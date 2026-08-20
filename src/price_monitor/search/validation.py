@@ -4,6 +4,7 @@ Applies the plausibility ladder that keeps hallucinated or mis-matched prices
 out of the recorded history, or flags them where they are merely suspicious.
 """
 
+import math
 from datetime import datetime
 
 from price_monitor.app_config import PriceCtrl
@@ -20,8 +21,10 @@ def validate(
 ) -> PriceReading:
     """Grade ``payload`` against the plausibility ladder."""
     source_url = str(payload.get("url") or "").strip()
-    if not source_url and fallback_urls:
-        source_url = fallback_urls[0]
+    if not source_url:
+        source_url = next(
+            (u.strip() for u in fallback_urls if u and str(u).strip()), ""
+        )
     note = str(payload.get("note") or "").strip()
 
     def reading(
@@ -45,10 +48,16 @@ def validate(
     if currency != ctrl.currency.strip().upper():
         return reading(None, PriceStatus.WRONG_CURRENCY, f"reported {currency or '?'}")
 
+    if isinstance(payload.get("price"), bool):
+        return reading(None, PriceStatus.REJECTED, "price was a boolean")
+
     try:
         price = float(payload.get("price"))
     except (TypeError, ValueError):
         return reading(None, PriceStatus.REJECTED, "price was not a number")
+
+    if math.isnan(price) or math.isinf(price):
+        return reading(None, PriceStatus.REJECTED, f"price was {price}")
 
     if price <= 0 or price > ctrl.max_plausible_price:
         return reading(None, PriceStatus.REJECTED, f"implausible price {price}")

@@ -104,3 +104,50 @@ def test_source_url_prefers_the_reported_url():
 
 def test_source_url_blank_when_nothing_available():
     assert _validate(_payload(url=""), urls=[]).source_url == ""
+
+
+def test_nan_price_is_rejected():
+    reading = _validate(_payload(price=float("nan")))
+    assert reading.status == PriceStatus.REJECTED
+    assert reading.price is None
+
+
+def test_nan_string_price_is_rejected():
+    reading = _validate(_payload(price="nan"))
+    assert reading.status == PriceStatus.REJECTED
+    assert reading.price is None
+
+
+def test_positive_infinity_is_rejected():
+    reading = _validate(_payload(price=float("inf")))
+    assert reading.status == PriceStatus.REJECTED
+    assert reading.price is None
+
+
+def test_negative_infinity_is_rejected():
+    reading = _validate(_payload(price=float("-inf")))
+    assert reading.status == PriceStatus.REJECTED
+    assert reading.price is None
+
+
+def test_true_price_is_rejected():
+    reading = _validate(_payload(price=True))
+    assert reading.status == PriceStatus.REJECTED
+    assert reading.price is None
+
+
+def test_false_price_is_rejected():
+    reading = _validate(_payload(price=False))
+    assert reading.status == PriceStatus.REJECTED
+    assert reading.price is None
+
+
+def test_fallback_urls_selects_first_non_blank_entry():
+    reading = _validate(_payload(url=""), urls=["", "https://second.example/p"])
+    assert reading.source_url == "https://second.example/p"
+
+
+def test_fallback_urls_skips_none_entries():
+    reading = _validate(_payload(url=""), urls=[None, "https://second.example/p"])
+    assert reading.source_url == "https://second.example/p"
+    assert isinstance(reading.source_url, str)
