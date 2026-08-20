@@ -33,7 +33,7 @@ def extract_json(text: str) -> dict[str, Any]:
 
     try:
         parsed = json.loads(candidate)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise ValueError(f"malformed JSON in reply: {exc}") from exc
 
     if not isinstance(parsed, dict):
@@ -46,6 +46,15 @@ def _strip_fences(text: str) -> str:
     stripped = text.strip()
     if not stripped.startswith("```"):
         return stripped
+    # Single-line fence: strip opening and closing backticks
+    if stripped.count("```") == 2 and "\n" not in stripped:
+        # Format: ```[label] content```
+        # Find the position of the first closing ```
+        first_fence_end = stripped.find("```", 3)
+        if first_fence_end != -1:
+            # Extract content between the fences
+            return stripped[3:first_fence_end].strip()
+    # Multi-line fence: strip the opening and closing lines
     lines = stripped.splitlines()[1:]
     if lines and lines[-1].strip().startswith("```"):
         lines = lines[:-1]
@@ -53,30 +62,37 @@ def _strip_fences(text: str) -> str:
 
 
 def _first_balanced_object(text: str) -> str | None:
-    """Return the first brace-balanced ``{...}`` span, ignoring braces in strings."""
-    start = text.find("{")
-    if start == -1:
-        return None
+    """Return the first brace-balanced ``{...}`` span, ignoring braces in strings.
 
-    depth = 0
-    in_string = False
-    escaped = False
-    for index in range(start, len(text)):
-        char = text[index]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : index + 1]
-    return None
+    Retries from the next ``{`` if a candidate brace fails to balance, handling
+    cases where stray braces appear before the actual JSON object.
+    """
+    search_start = 0
+    while True:
+        start = text.find("{", search_start)
+        if start == -1:
+            return None
+
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : index + 1]
+        # This candidate didn't balance; try the next {
+        search_start = start + 1

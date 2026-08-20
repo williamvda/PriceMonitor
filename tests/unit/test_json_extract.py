@@ -67,3 +67,35 @@ def test_unterminated_object_raises():
 def test_malformed_json_raises():
     with pytest.raises(ValueError):
         extract_json('{"price": 279.0,,}')
+
+
+def test_non_dict_json_raises():
+    """JSON that is not an object (bare array) must raise ValueError."""
+    with pytest.raises(ValueError):
+        extract_json('[1, 2, 3]')
+
+
+def test_deeply_nested_json_does_not_escape():
+    """Deeply nested JSON that causes RecursionError must raise ValueError, not escape."""
+    # Build a deeply nested object (~1200 levels deep, beyond Python's default recursion limit)
+    text = '{"a":' * 1200 + '1' + '}' * 1200
+    with pytest.raises(ValueError):
+        extract_json(text)
+
+
+def test_stray_brace_before_real_object():
+    """Stray unmatched brace before the real object should not prevent extraction."""
+    text = 'note: { and the data is {"price": 5.0}'
+    assert extract_json(text) == {"price": 5.0}
+
+
+def test_stray_brace_before_fenced_object():
+    """Stray unmatched brace before a fenced object should not prevent extraction."""
+    text = 'note: {\n```json\n{"price": 5.0}\n```'
+    assert extract_json(text) == {"price": 5.0}
+
+
+def test_single_line_fence():
+    """Single-line fence with no internal newlines must not be destroyed."""
+    text = '```json {"price": 1.0}```'
+    assert extract_json(text) == {"price": 1.0}
