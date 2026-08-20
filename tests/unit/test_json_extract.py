@@ -1,5 +1,7 @@
 """Tests for JSON extraction from LLM responses."""
 
+import time
+
 import pytest
 
 from price_monitor.search.json_extract import extract_json
@@ -99,3 +101,37 @@ def test_single_line_fence():
     """Single-line fence with no internal newlines must not be destroyed."""
     text = '```json {"price": 1.0}```'
     assert extract_json(text) == {"price": 1.0}
+
+
+def test_brace_inside_string_literal_not_corrupted():
+    """A brace inside a string literal must not be treated as a span boundary.
+
+    This guards against the corruption case where a retry-based scanner could
+    select a brace inside a string, returning corrupted data from inside a
+    string literal rather than the real JSON object.
+    """
+    # The opening brace inside the "note" string value never closes; the whole
+    # expression is unterminated and should raise.
+    text = '{"note": "z{ "ok": 5} trailing junk'
+    with pytest.raises(ValueError):
+        extract_json(text)
+
+
+def test_performance_on_many_stray_braces():
+    """Large inputs with many stray braces must not cause O(n²) behavior.
+
+    A garbled reply with many unmatched braces (plausible from truncated or
+    repeated model output) must complete within a generous wall-clock bound.
+    The stack-based scanner is O(n) and should handle this easily.
+    """
+    # Create a reply with 2000 stray braces followed by a real object.
+    # With O(n²) retry behavior, this would take several seconds; with O(n),
+    # it should be nearly instant.
+    text = "{" * 2000 + '{"price": 5.0}'
+    start_time = time.time()
+    result = extract_json(text)
+    elapsed = time.time() - start_time
+
+    assert result == {"price": 5.0}
+    # Generous bound: should complete in well under 1 second on any reasonable machine
+    assert elapsed < 1.0, f"Extraction took {elapsed:.2f}s, should be instant"

@@ -64,35 +64,39 @@ def _strip_fences(text: str) -> str:
 def _first_balanced_object(text: str) -> str | None:
     """Return the first brace-balanced ``{...}`` span, ignoring braces in strings.
 
-    Retries from the next ``{`` if a candidate brace fails to balance, handling
-    cases where stray braces appear before the actual JSON object.
+    Single-pass algorithm using a stack to track opening braces. Returns the
+    complete span with the smallest starting index (handles stray braces and
+    nested objects). Correctly ignores braces inside string literals.
     """
-    search_start = 0
-    while True:
-        start = text.find("{", search_start)
-        if start == -1:
-            return None
+    stack: list[int] = []  # Stack of opening brace positions
+    first_complete_span: tuple[int, int] | None = None  # (start, end) of complete object with smallest start
 
-        depth = 0
-        in_string = False
-        escaped = False
-        for index in range(start, len(text)):
-            char = text[index]
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    in_string = False
-                continue
-            if char == '"':
-                in_string = True
-            elif char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    return text[start : index + 1]
-        # This candidate didn't balance; try the next {
-        search_start = start + 1
+    in_string = False
+    escaped = False
+
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            stack.append(index)
+        elif char == "}":
+            if stack:
+                start = stack.pop()
+                # We found a complete span; prefer the one with the smallest start index
+                if first_complete_span is None or start < first_complete_span[0]:
+                    first_complete_span = (start, index)
+
+    if first_complete_span is None:
+        return None
+
+    start, end = first_complete_span
+    return text[start : end + 1]
