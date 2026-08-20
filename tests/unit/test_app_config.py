@@ -11,7 +11,8 @@ from price_monitor.app_config import load_price_config
 def _write_config(
     tmp_path: Path, price_ctrl: dict | None = None, encryption_key: str | None = None
 ) -> Path:
-    # Encrypt the api_key with the provided key
+    # EncStr fields use strict=True decryption, so they fail closed without a real
+    # Fernet token. We encrypt test-key rather than write plaintext.
     api_key_value = "test-key"
     if encryption_key:
         cipher = Fernet(encryption_key.encode())
