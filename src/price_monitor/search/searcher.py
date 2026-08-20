@@ -65,7 +65,14 @@ class PriceSearcher:
         """Look up ``item``'s current price, never raising on failure."""
         try:
             searched = self._search_client.prompt(search_prompt(item))
-        except LLMError as exc:
+        except (LLMError, KeyError, IndexError, TypeError) as exc:
+            # llmbridge's LLMClient.prompt() wraps only transport failures
+            # (_http_post) as LLMError; it calls the provider's
+            # parse_response() unguarded. The stock Gemini parser indexes
+            # candidates[0]/parts[0] with no .get() guards, so a
+            # safety-filtered response (empty candidates) or a MAX_TOKENS
+            # truncation (empty parts) raises IndexError/KeyError straight
+            # out of prompt() rather than coming back as an LLMError.
             self.logger.warning(f"Search call failed for '{item.name}': {exc}")
             return self._failed(item, timestamp, PriceStatus.ERROR, str(exc))
 
@@ -79,7 +86,9 @@ class PriceSearcher:
 
         try:
             formatted = self._format_client.prompt(format_prompt(searched.text, urls))
-        except LLMError as exc:
+        except (LLMError, KeyError, IndexError, TypeError) as exc:
+            # Same unguarded parse_response() exposure as call one above —
+            # the un-grounded stock GeminiProvider is not immune to it.
             self.logger.warning(f"Format call failed for '{item.name}': {exc}")
             return self._failed(item, timestamp, PriceStatus.ERROR, str(exc))
 

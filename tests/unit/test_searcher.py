@@ -119,6 +119,30 @@ def test_rate_limit_on_call_two_yields_error(logger):
     assert reading.status == PriceStatus.ERROR
 
 
+def test_non_llm_error_from_call_one_is_caught_not_raised(logger):
+    # llmbridge only wraps transport failures as LLMError; a provider's
+    # parse_response() can raise a bare KeyError/IndexError straight out of
+    # prompt(). price() must catch that too, not just LLMError.
+    search = FakeClient(KeyError("candidates"))
+    fmt = FakeClient(_response(_GOOD_JSON))
+    try:
+        reading = _searcher(search, fmt, logger).price(ITEM, None, NOW)
+    except Exception as exc:
+        pytest.fail(f"price() raised {exc!r} instead of returning a PriceReading")
+    assert reading.status == PriceStatus.ERROR
+    assert fmt.prompts == []
+
+
+def test_non_llm_error_from_call_two_is_caught_not_raised(logger):
+    search = FakeClient(_response("It costs 279 GBP."))
+    fmt = FakeClient(KeyError("candidates"))
+    try:
+        reading = _searcher(search, fmt, logger).price(ITEM, None, NOW)
+    except Exception as exc:
+        pytest.fail(f"price() raised {exc!r} instead of returning a PriceReading")
+    assert reading.status == PriceStatus.ERROR
+
+
 def test_empty_call_one_reply_is_a_parse_error(logger):
     search = FakeClient(_response("   "))
     fmt = FakeClient(_response(_GOOD_JSON))
