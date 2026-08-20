@@ -1,0 +1,6 @@
+# mise.toml
+[tools]
+python = "3.11"   # or any version you need, e.g. "3.12" or "latest"
+
+[env]
+_.python.venv = {path=".venv", create = true}
