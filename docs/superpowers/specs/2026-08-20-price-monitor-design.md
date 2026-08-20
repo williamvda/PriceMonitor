@@ -16,7 +16,7 @@ up and priced within minutes without a restart.
 | --- | --- | --- |
 | `py-utils` | `py_utils` | `git+https://github.com/williamvda/py-utils.git@v0.1.1` |
 | `google-drive-api` | `google_drive_api` | `git+https://github.com/williamvda/google-drive-api.git@v0.1.2` |
-| `llmbridge` | `llm_client` | local editable — see below |
+| `llmbridge` | `llmbridge` | local editable — see below |
 | `pandas`, `python-dotenv` | | PyPI |
 
 `llmbridge` (the `AIInterface` repo) has no git remote and no tags, so it
@@ -126,41 +126,68 @@ different reasons:
 
 This asymmetry is non-obvious and must carry a comment in the code.
 
-## Search adapter
+## Search adapter — two-call design
 
-The chosen provider is Gemini, via Google Search grounding. `llm_client` is not
-modified; a subclass is registered from within PriceMonitor:
+Combining Google Search grounding with structured JSON output is unreliable
+across the Gemini model line, not merely on one model. Documented failures
+include the leading segment of the response text being dropped so the JSON
+never parses, empty `response.text` under grounding, truncation reported with
+`finishReason: "STOP"`, and — critically for this design —
+`groundingChunks`/`groundingSupports` coming back **empty** when structured
+output is requested, which would destroy the `source_url` audit trail.
+
+PriceMonitor therefore splits each lookup into two calls:
+
+**Call 1 — grounded search.** Uses `GeminiSearchProvider` and asks for a plain
+prose answer. No structured output is requested, so grounding metadata stays
+populated.
 
 ```python
 class GeminiSearchProvider(GeminiProvider):
     PROVIDER_NAME = "gemini_search"
 
-    def build_request_body(...):   # inject the search-grounding tool
-    def parse_response(...):       # join all text parts, tolerate non-text parts
+    def build_request_body(...):   # adds tools: [{"google_search": {}}]
+    def parse_response(...):       # joins every parts[i]["text"], skips non-text parts
 
 ProviderRegistry.register("gemini_search", GeminiSearchProvider)
 ```
 
-`parse_response` **must** be overridden regardless of provider: the base
-implementations index the first content block only
-(`candidate["content"]["parts"][0]["text"]` for Gemini,
-`raw["content"][0]["text"]` for Anthropic), which raises or truncates once
-grounding adds non-text parts and splits the answer across several.
+**Call 2 — formatting.** Uses `llmbridge`'s **stock** `GeminiProvider`, with no
+tools and no grounding, to convert call 1's prose into the JSON object below.
+This is the well-supported regime, so no subclass is needed for it.
 
-Adding Anthropic or OpenAI later is the same two-method subclass registered
-under `anthropic_search` / `openai_search`, selected purely by the
-`llm_config.provider` string. No PriceMonitor code branches on provider.
-Local models (Ollama) have no server-side search and cannot be supported by
-this route.
+`PriceSearcher` therefore holds two `LLMClient` instances — one bound to
+`gemini_search`, one to `gemini` — both built from the same `llm_config`.
 
-The exact request-body key and tool identifier must be verified against live
-provider documentation at implementation time, not written from memory.
+Verified against live documentation on 2026-08-20: the grounding tool key on
+`v1beta/models/{model}:generateContent` is `{"google_search": {}}` (older
+models used `google_search_retrieval`), answer text is at
+`candidates[0].content.parts[*].text`, and grounding sources are at
+`candidates[0].groundingMetadata.groundingChunks[*].web.uri`.
+
+`parse_response` **must** be overridden on the search provider: the base
+implementation indexes the first part only
+(`candidate["content"]["parts"][0]["text"]`), which truncates the answer once
+grounding splits it across several parts.
+
+Adding Anthropic or OpenAI later is the same subclass registered under
+`anthropic_search` / `openai_search`, selected purely by the
+`llm_config.provider` string. No PriceMonitor code branches on provider. Local
+models (Ollama) have no server-side search and cannot be supported this way.
+
+### Source URL provenance
+
+`source_url` is taken from the JSON `url` field when call 2 supplies one. When
+it is blank, it falls back to the first
+`groundingMetadata.groundingChunks[*].web.uri` read out of call 1's
+`PromptResponse.raw_response`, which `llmbridge` preserves unmodified. Only if
+both are absent is `source_url` left blank.
 
 ## Response contract and parsing
 
-Gemini's search grounding and its forced-JSON response mode are understood to
-be mutually exclusive, so no JSON response mime type is set. The system prompt
-demands a bare JSON object:
+Call 2 is prompted for a bare JSON object. No response mime type is set — the
+stock provider does not expose one, and prompt-level JSON is reliable without
+grounding in play:
 
 ```json
 {
@@ -174,13 +201,18 @@ demands a bare JSON object:
 ```
 
 `searcher.py` extracts it tolerantly: strip markdown fences, then scan for the
-first balanced `{…}`. This extractor is the highest-risk function in the
-project and gets dedicated unit tests for fenced, prose-wrapped, truncated, and
-malformed replies. Extraction failure produces a `PARSE_ERROR` row; it never
-raises out of the run.
+first balanced `{…}`. As a last resort, if a closing `}` is present but no
+opening `{`, prepend one and retry — this recovers the known leading-truncation
+failure should it ever surface on call 2. The extractor is the highest-risk
+function in the project and gets dedicated unit tests for fenced,
+prose-wrapped, leading-truncated, and malformed replies. Extraction failure
+produces a `PARSE_ERROR` row; it never raises out of the run.
 
-Two prompt templates, selected by `Item.is_direct_url`: read the price from an
-exact page, or search a site for a named item. Each is unit-tested.
+Two call-1 prompt templates, selected by `Item.is_direct_url`: read the price
+from an exact page, or search a site for a named item. Each is unit-tested.
+
+An empty or whitespace-only reply from either call is treated as
+`PARSE_ERROR`, covering the documented empty-`response.text` failure.
 
 ## Validation ladder
 
@@ -266,7 +298,7 @@ first occurrence, so a copy-pasted row cannot double the search spend.
   },
   "llm_config": {
     "provider": "gemini_search",
-    "model": "<gemini model id>",
+    "model": "gemini-3.7-flash",
     "api_key": "<EncStr>",
     "max_tokens": 1024,
     "temperature": 0.0
@@ -287,6 +319,11 @@ first occurrence, so a copy-pasted row cannot double the search spend.
 `drive_config` reuses `google_drive_api.DriveConfig`. Every `price_ctrl` and
 `llm_config` field carries a default so a missing section still loads.
 
+`provider` names the **call 1** (grounded) provider. Call 2 always uses the
+plain `gemini` provider with the same `model` and `api_key`. A flash model is
+the default: this task reads a number off a page and is not reasoning-limited,
+and pro models show their own grounding failures without buying reliability.
+
 ## CLI
 
 ```bash
@@ -306,11 +343,15 @@ Test-driven throughout. Unit tests use a fake `LLMClient` and a fake
 
 Coverage targets:
 
-- JSON extraction: fenced, prose-wrapped, truncated, malformed
+- JSON extraction: fenced, prose-wrapped, leading-truncated, malformed, empty
 - every branch of the validation ladder
 - `Item.is_direct_url` across domain / scheme / product-URL forms
 - prompt template selection
 - `GeminiSearchProvider` body injection and multi-part response parsing
+- the two-call sequence: call 1's prose is what reaches call 2, and a call 1
+  failure short-circuits without making call 2
+- `source_url` fallback to `groundingChunks[*].web.uri` when the JSON `url` is
+  blank
 - current/min/mean computation, including rows with null prices
 - new-item detection, including an item added and removed between polls
 - malformed item rows: blank name, blank website, duplicate pairs
