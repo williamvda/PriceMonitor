@@ -69,7 +69,9 @@ def _first_balanced_object(text: str) -> str | None:
     nested objects). Correctly ignores braces inside string literals.
     """
     stack: list[int] = []  # Stack of opening brace positions
-    first_complete_span: tuple[int, int] | None = None  # (start, end) of complete object with smallest start
+    first_complete_span: tuple[int, int] | None = (
+        None  # (start, end) of complete object with smallest start
+    )
 
     in_string = False
     escaped = False

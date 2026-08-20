@@ -71,16 +71,17 @@ def test_malformed_json_raises():
         extract_json('{"price": 279.0,,}')
 
 
-def test_non_dict_json_raises():
-    """JSON that is not an object (bare array) must raise ValueError."""
+def test_bare_array_with_no_braces_raises():
+    """Reply with no JSON object (bare array with no opening brace) must raise."""
     with pytest.raises(ValueError):
-        extract_json('[1, 2, 3]')
+        extract_json("[1, 2, 3]")
 
 
 def test_deeply_nested_json_does_not_escape():
-    """Deeply nested JSON that causes RecursionError must raise ValueError, not escape."""
-    # Build a deeply nested object (~1200 levels deep, beyond Python's default recursion limit)
-    text = '{"a":' * 1200 + '1' + '}' * 1200
+    """Deeply nested JSON that causes RecursionError must raise ValueError."""
+    # Build a deeply nested object (~1200 levels deep, beyond Python's
+    # default recursion limit)
+    text = '{"a":' * 1200 + "1" + "}" * 1200
     with pytest.raises(ValueError):
         extract_json(text)
 
