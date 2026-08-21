@@ -155,6 +155,35 @@ def test_last_prices_uses_the_most_recent_non_null(logger):
     assert tab.last_prices()[("Widget", "shop.example")] == 120.0
 
 
+def test_last_prices_prefers_the_later_recorded_row_on_duplicate_timestamps(logger):
+    frame = _history(
+        [
+            {
+                "timestamp": "2026-08-20 06:00:00",
+                "item": "Widget",
+                "website": "shop.example",
+                "price": "100.0",
+                "currency": "GBP",
+                "status": "ok",
+                "source_url": "",
+                "note": "",
+            },
+            {
+                "timestamp": "2026-08-20 06:00:00",
+                "item": "Widget",
+                "website": "shop.example",
+                "price": "200.0",
+                "currency": "GBP",
+                "status": "ok",
+                "source_url": "",
+                "note": "",
+            },
+        ]
+    )
+    tab = HistoryTab(FakeSheet(frame), "Prices", logger)
+    assert tab.last_prices()[("Widget", "shop.example")] == 200.0
+
+
 def test_known_items_includes_items_with_no_successful_price(logger):
     frame = _history(
         [

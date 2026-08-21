@@ -11,6 +11,7 @@ import pandas as pd
 from py_utils.logger import get_child_logger
 
 from price_monitor.models import PriceReading
+from price_monitor.sheets.protocol import SheetInterface
 
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -31,7 +32,9 @@ SUMMARY_COLUMNS = ["item", "website", "current", "min", "mean", "last_checked"]
 class HistoryTab:
     """Reads and appends the long-format price history."""
 
-    def __init__(self, gsheet, sheet_name: str, logger: logging.Logger) -> None:
+    def __init__(
+        self, gsheet: SheetInterface, sheet_name: str, logger: logging.Logger
+    ) -> None:
         self.logger = get_child_logger(logger, __class__.__name__)
         self._gsheet = gsheet
         self._sheet_name = sheet_name
@@ -74,7 +77,8 @@ class HistoryTab:
             return prices
         priced = frame[frame["price"].notna()]
         for key, group in priced.groupby(["item", "website"], sort=False):
-            prices[key] = float(group.sort_values("timestamp")["price"].iloc[-1])
+            ordered = group.sort_values("timestamp", kind="stable")
+            prices[key] = float(ordered["price"].iloc[-1])
         return prices
 
     def known_items(self) -> set[tuple[str, str]]:
@@ -92,7 +96,7 @@ class HistoryTab:
 
         rows = []
         for (item, website), group in frame.groupby(["item", "website"], sort=False):
-            ordered = group.sort_values("timestamp")
+            ordered = group.sort_values("timestamp", kind="stable")
             priced = ordered[ordered["price"].notna()]
             rows.append(
                 {
