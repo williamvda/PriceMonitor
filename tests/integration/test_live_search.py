@@ -21,6 +21,15 @@ pytestmark = pytest.mark.integration
 # a genuine sheet, created and torn down entirely within the test below.
 _SCRATCH_HISTORY_TAB = "_price_monitor_integration_scratch_history"
 
+# Chosen because search grounding can actually reach it: this retailer's prices
+# are in Google's index, and a bare domain routes to the site-search prompt
+# rather than a page fetch. Bot-gated targets are useless as a canary here —
+# amazon.co.uk, and printerland's own product pages (Cloudflare serves a
+# challenge to any automated fetch), return not_found however well the pipeline
+# works. Before "fixing" a failure by swapping this item, check the product is
+# still listed: a genuine regression looks the same as a delisted SKU.
+_LIVE_ITEM = Item(name="Epson EcoTank ET-4850", website="printerland.co.uk")
+
 
 def test_grounded_lookup_returns_a_usable_reading(config, logger):
     """A grounded lookup of a widely-stocked product must find a price.
@@ -34,8 +43,7 @@ def test_grounded_lookup_returns_a_usable_reading(config, logger):
         pytest.skip("grounding disabled in config — cannot verify the grounded path")
 
     searcher = PriceSearcher(config.llm_config, config.price_ctrl, logger)
-    item = Item(name="Sony WH-1000XM5 headphones", website="amazon.co.uk")
-    reading = searcher.price(item, None, datetime.now().replace(microsecond=0))
+    reading = searcher.price(_LIVE_ITEM, None, datetime.now().replace(microsecond=0))
 
     assert reading.status in {
         PriceStatus.OK,
@@ -59,8 +67,7 @@ def test_ungrounded_lookup_completes_without_error(config, logger):
     """
     llm_config = replace(config.llm_config, grounded=False)
     searcher = PriceSearcher(llm_config, config.price_ctrl, logger)
-    item = Item(name="Sony WH-1000XM5 headphones", website="amazon.co.uk")
-    reading = searcher.price(item, None, datetime.now().replace(microsecond=0))
+    reading = searcher.price(_LIVE_ITEM, None, datetime.now().replace(microsecond=0))
 
     assert reading.status not in {
         PriceStatus.ERROR,
