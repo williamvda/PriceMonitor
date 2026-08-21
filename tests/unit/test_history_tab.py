@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from price_monitor.models import PriceReading, PriceStatus
-from price_monitor.sheets.history_tab import HistoryTab
+from price_monitor.sheets.history_tab import COLUMNS, HistoryTab
 
 
 class FakeSheet:
@@ -55,9 +55,9 @@ def _history(rows: list[dict]) -> pd.DataFrame:
         "website",
         "price",
         "currency",
-        "status",
         "source_url",
         "note",
+        "status",
     ]
     return pd.DataFrame(rows, columns=columns)
 
@@ -298,3 +298,47 @@ def test_item_with_no_prices_summarises_blank(logger):
 
 def test_summarise_of_empty_history_is_empty(logger):
     assert HistoryTab(FakeSheet(), "Prices", logger).summarise().empty
+
+
+def test_columns_end_with_status_so_trailing_cells_are_never_trimmed():
+    assert COLUMNS[-1] == "status"
+
+
+@pytest.mark.parametrize(
+    "status", [PriceStatus.OK, PriceStatus.NOT_FOUND, PriceStatus.ERROR]
+)
+def test_written_frames_final_column_is_never_empty_regardless_of_status(
+    logger, status
+):
+    sheet = FakeSheet()
+    HistoryTab(sheet, "Prices", logger).append([_reading(price=None, status=status)])
+    last_column = sheet.frame.columns[-1]
+    assert last_column == "status"
+    assert sheet.frame.iloc[0][last_column] != ""
+
+
+def test_round_trip_with_blank_source_url_and_note_keeps_frame_intact(logger):
+    sheet = FakeSheet()
+    tab = HistoryTab(sheet, "Prices", logger)
+    tab.append([_reading(price=100.0, status=PriceStatus.OK)])
+    # Simulate the Sheets API omitting the trailing empty note/source_url cells
+    # by re-reading through a frame with no NaN padding needed (full width).
+    read_back = HistoryTab(FakeSheet(sheet.frame), "Prices", logger).read()
+    assert list(read_back.columns) == COLUMNS
+    assert read_back.iloc[0]["item"] == "Widget"
+    row = HistoryTab(FakeSheet(sheet.frame), "Prices", logger).summarise().iloc[0]
+    assert row["current"] == 100.0
+
+
+def test_read_fills_nan_with_empty_string(logger):
+    # A manually-edited or ragged sheet can produce NaN in short columns;
+    # read() must not let that NaN survive into the returned frame.
+    frame = pd.DataFrame(
+        [["2026-08-20 06:00:00", "Widget", "shop.example"]],
+        columns=["timestamp", "item", "website"],
+    )
+    frame = frame.reindex(columns=COLUMNS)
+    tab = HistoryTab(FakeSheet(frame), "Prices", logger)
+    result = tab.read()
+    assert result.iloc[0]["status"] == ""
+    assert not result.isna().any().any()

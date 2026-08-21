@@ -70,6 +70,11 @@ class ItemsTab:
             row = {"item": item.name, "website": item.website}
             for field in _SUMMARY_FIELDS:
                 row[field] = stats.get(field, "")
+            # "never" (not "") anchors the row's final column, and reads
+            # more clearly than a blank cell, which is ambiguous between
+            # "not checked yet" and "something went wrong".
+            if not row["last_checked"]:
+                row["last_checked"] = "never"
             rows.append(row)
 
         frame = pd.DataFrame(rows, columns=COLUMNS)

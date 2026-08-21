@@ -15,15 +15,23 @@ from price_monitor.sheets.protocol import SheetInterface
 
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+# `status` MUST stay last. The Sheets API omits trailing empty cells from each
+# row, and when every row in a read comes back short, pandas does not pad —
+# it raises inside GoogleSheetInterface.read() before this module ever sees
+# the data, so there is nothing we can do to recover once that happens. Both
+# `source_url` and `note` are blank on most readings, so if either sat last
+# a fully-successful run's history could become permanently unreadable.
+# `status` is always a non-empty PriceStatus value, so it anchors the row
+# width. Do not "tidy" it back into the middle.
 COLUMNS = [
     "timestamp",
     "item",
     "website",
     "price",
     "currency",
-    "status",
     "source_url",
     "note",
+    "status",
 ]
 
 SUMMARY_COLUMNS = ["item", "website", "current", "min", "mean", "last_checked"]
@@ -47,7 +55,11 @@ class HistoryTab:
         for column in COLUMNS:
             if column not in frame.columns:
                 frame[column] = ""
-        return frame[COLUMNS]
+        # Belt-and-braces: a manually-edited sheet can still come back with
+        # mixed-width rows (some columns padded with NaN by pandas even
+        # though every expected column is present). Left alone, a NaN would
+        # be rendered as the literal string "nan" on the next write.
+        return frame[COLUMNS].fillna("")
 
     def append(self, readings: list[PriceReading]) -> None:
         """Append readings to the tab, creating it on first use."""
@@ -135,7 +147,7 @@ def _to_row(reading: PriceReading) -> dict[str, str]:
         "website": reading.website,
         "price": "" if reading.price is None else f"{reading.price:.2f}",
         "currency": reading.currency,
-        "status": reading.status.value,
         "source_url": reading.source_url,
         "note": reading.note,
+        "status": reading.status.value,
     }

@@ -132,7 +132,7 @@ def test_write_summary_uses_write_so_deletions_do_not_linger(logger):
     assert row["mean"] == 70.0
 
 
-def test_item_without_history_gets_blank_summary_cells(logger):
+def test_item_without_history_gets_never_checked_sentinel(logger):
     sheet = FakeSheet()
     ItemsTab(sheet, "Items", logger).write_summary(
         [Item(name="New", website="shop.example")], pd.DataFrame()
@@ -140,7 +140,28 @@ def test_item_without_history_gets_blank_summary_cells(logger):
     row = sheet.frame.iloc[0]
     assert row["item"] == "New"
     assert row["current"] == ""
-    assert row["last_checked"] == ""
+    assert row["last_checked"] == "never"
+
+
+def test_item_with_history_gets_a_real_timestamp(logger):
+    sheet = FakeSheet()
+    summary = pd.DataFrame(
+        [
+            {
+                "item": "Widget",
+                "website": "shop.example",
+                "current": 60.0,
+                "min": 50.0,
+                "mean": 70.0,
+                "last_checked": "2026-08-20 18:00:00",
+            }
+        ]
+    )
+    ItemsTab(sheet, "Items", logger).write_summary(
+        [Item(name="Widget", website="shop.example")], summary
+    )
+    row = sheet.frame.iloc[0]
+    assert row["last_checked"] == "2026-08-20 18:00:00"
 
 
 def test_summary_row_order_follows_the_items_list(logger):
