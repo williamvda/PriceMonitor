@@ -40,8 +40,14 @@ If the page shows both a VAT-inclusive and a VAT-exclusive price, report the
 VAT-inclusive one and say so. If it shows only one, report it and say which
 kind it is. Do not calculate VAT yourself.
 
-If the page does not show a price, say so plainly.
-Do not guess a price. Report only a price you actually saw."""
+If you cannot read that page — it is blocked, requires a check you cannot
+pass, or shows no price — then search for this product's current price at the
+same retailer instead. Report the price the search results show, name the URL
+it came from, and say that you fell back to search.
+
+If neither the page nor a search shows a price, say so plainly.
+Do not guess a price. Report only a price you actually saw on the page or in
+search results."""
 
 _FORMAT_TEMPLATE = """Convert the report below into one JSON object and nothing else.
 

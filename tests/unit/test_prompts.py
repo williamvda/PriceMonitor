@@ -53,3 +53,26 @@ def test_format_prompt_names_every_schema_field():
     prompt = format_prompt("report", [])
     for field in ("price", "currency", "url", "in_stock", "found", "note"):
         assert f'"{field}"' in prompt
+
+
+def test_page_prompt_degrades_to_search_when_the_page_is_blocked():
+    """Bot-gated retailers (Cloudflare and friends) serve a challenge page to
+    any automated fetch, so a page-only instruction fails outright. The
+    fallback keeps those items working via the search index."""
+    prompt = search_prompt(Item(name="X", website="https://a.com/p"))
+    assert "blocked" in prompt
+    assert "fell back to search" in prompt
+
+
+def test_page_prompt_fallback_still_forbids_guessing():
+    """The degraded path must reach search results, never model recall — a
+    remembered price would look like real data in the history tab."""
+    prompt = search_prompt(Item(name="X", website="https://a.com/p"))
+    assert "Do not guess a price" in prompt
+    assert "actually saw on the page or in\nsearch results" in prompt
+
+
+def test_site_prompt_is_unchanged_by_the_page_fallback():
+    prompt = search_prompt(Item(name="X", website="a.com"))
+    assert "Search that site" in prompt
+    assert "fell back to search" not in prompt
