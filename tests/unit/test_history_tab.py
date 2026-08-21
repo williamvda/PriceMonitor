@@ -35,7 +35,11 @@ def logger():
 
 
 def _reading(
-    item="Widget", price=100.0, when="2026-08-20 06:00:00", status=PriceStatus.OK
+    item="Widget",
+    price=100.0,
+    when="2026-08-20 06:00:00",
+    status=PriceStatus.OK,
+    source_url="https://shop.example/w",
 ):
     return PriceReading(
         timestamp=datetime.strptime(when, "%Y-%m-%d %H:%M:%S"),
@@ -44,7 +48,7 @@ def _reading(
         price=price,
         currency="GBP",
         status=status,
-        source_url="https://shop.example/w",
+        source_url=source_url,
     )
 
 
@@ -305,13 +309,22 @@ def test_columns_end_with_status_so_trailing_cells_are_never_trimmed():
 
 
 @pytest.mark.parametrize(
-    "status", [PriceStatus.OK, PriceStatus.NOT_FOUND, PriceStatus.ERROR]
+    "status, source_url",
+    [
+        # A real not_found/error reading never has a source_url: nothing was
+        # found to link to. Only a successful OK reading would carry one.
+        (PriceStatus.OK, "https://shop.example/w"),
+        (PriceStatus.NOT_FOUND, ""),
+        (PriceStatus.ERROR, ""),
+    ],
 )
 def test_written_frames_final_column_is_never_empty_regardless_of_status(
-    logger, status
+    logger, status, source_url
 ):
     sheet = FakeSheet()
-    HistoryTab(sheet, "Prices", logger).append([_reading(price=None, status=status)])
+    HistoryTab(sheet, "Prices", logger).append(
+        [_reading(price=None, status=status, source_url=source_url)]
+    )
     last_column = sheet.frame.columns[-1]
     assert last_column == "status"
     assert sheet.frame.iloc[0][last_column] != ""
@@ -320,12 +333,18 @@ def test_written_frames_final_column_is_never_empty_regardless_of_status(
 def test_round_trip_with_blank_source_url_and_note_keeps_frame_intact(logger):
     sheet = FakeSheet()
     tab = HistoryTab(sheet, "Prices", logger)
-    tab.append([_reading(price=100.0, status=PriceStatus.OK)])
+    # note is blank by PriceReading's own default; source_url is forced blank
+    # here too, since that is the realistic shape of a not_found/error
+    # reading — the exact case the column reorder exists to survive.
+    tab.append([_reading(price=100.0, status=PriceStatus.OK, source_url="")])
     # Simulate the Sheets API omitting the trailing empty note/source_url cells
     # by re-reading through a frame with no NaN padding needed (full width).
     read_back = HistoryTab(FakeSheet(sheet.frame), "Prices", logger).read()
     assert list(read_back.columns) == COLUMNS
     assert read_back.iloc[0]["item"] == "Widget"
+    assert read_back.iloc[0]["source_url"] == ""
+    assert read_back.iloc[0]["note"] == ""
+    assert read_back.iloc[0]["status"] == "ok"
     row = HistoryTab(FakeSheet(sheet.frame), "Prices", logger).summarise().iloc[0]
     assert row["current"] == 100.0
 
