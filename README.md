@@ -83,17 +83,33 @@ records `price` as blank.
 
 ## Installation
 
-`llmbridge` is not yet published anywhere pip can resolve on its own, so
-install it from its local checkout first, then install PriceMonitor with its
-remaining dependencies:
+Three dependencies — `py-utils`, `google-drive-api`, and `llmbridge` (from the
+`AIInterface` repo) — live in private GitHub repositories and are pinned to
+tags over SSH. The installing machine therefore needs an SSH key with **read
+access to all three**; a GitHub deploy key will not do, since a deploy key is
+scoped to a single repository. Use a machine user, or an agent-forwarded
+personal key.
 
 ```bash
-pip install -e ../AIInterface
-pip install -e ".[dev]"
+pip install ".[dev]"        # development, from a checkout
+pip install git+ssh://git@github.com/williamvda/PriceMonitor.git@master
 ```
 
-(Adjust the first path if your checkout of the `llmbridge` source, the
-`AIInterface` repo, lives somewhere other than a sibling directory.)
+Verify the SSH access before installing, or pip will fail partway through with
+a bare git error:
+
+```bash
+for r in py-utils google-drive-api AIInterface PriceMonitor; do
+  git ls-remote "git@github.com:williamvda/$r.git" >/dev/null \
+    && echo "$r ok" || echo "$r UNREACHABLE"
+done
+```
+
+The pins are tags, never branches — a redeploy must never be able to pull
+dependency code that no test has run against. When you release a new version
+of a dependency, bump the tag in `pyproject.toml` deliberately and re-run the
+suites against a clean virtualenv built from the pins alone, not from editable
+installs of your local checkouts.
 
 ## Setup
 

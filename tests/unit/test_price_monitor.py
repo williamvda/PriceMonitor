@@ -1,13 +1,16 @@
 """Tests for the PriceMonitor controller: timing, orchestration, and the CLI parser."""
 
 import logging
+import signal
 import threading
 import time
 from datetime import datetime, timedelta
+from unittest import mock
 
 import pandas as pd
 import pytest
 
+import price_monitor.price_monitor as price_monitor_module
 from price_monitor.app_config import PriceCtrl
 from price_monitor.models import Item, PriceReading, PriceStatus
 from price_monitor.price_monitor import PriceMonitor, args_parser
@@ -386,3 +389,21 @@ def test_parser_accepts_force():
 
 def test_force_defaults_to_off():
     assert args_parser().parse_args(["--secrets", "/tmp/s"]).force is False
+
+
+def test_sigterm_handler_sets_the_stop_event(logger):
+    """A service manager stops the process with SIGTERM, which Python does not
+    catch by default — without this the worker thread dies mid-write."""
+    monitor = _monitor(FakeSheet({"Items": _items([])}), FakeSearcher(), logger)
+    installed: dict[int, object] = {}
+
+    def fake_signal(signum, handler):
+        installed[signum] = handler
+
+    with mock.patch.object(price_monitor_module.signal, "signal", fake_signal):
+        price_monitor_module._install_sigterm_handler(monitor, logger)
+
+    assert signal.SIGTERM in installed
+    assert not monitor.stop_event.is_set()
+    installed[signal.SIGTERM](signal.SIGTERM, None)
+    assert monitor.stop_event.is_set()
