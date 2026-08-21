@@ -12,7 +12,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from google_drive_api import GoogleSheetInterface
@@ -73,14 +73,41 @@ class PriceMonitor:
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name="PriceMonitor")
 
-    def update(self) -> None:
-        """Price every tracked item and rewrite the summary."""
+    def update(self, force: bool = False) -> None:
+        """Price tracked items due for a refresh and rewrite the summary.
+
+        An item checked less than ``refresh_rate_h`` ago is skipped: each
+        lookup costs a billed search, and repeated CLI runs would otherwise
+        re-price the same items for no new information. ``force`` re-prices
+        everything regardless.
+        """
         items = self.items_tab.read()
         if not items:
             self.logger.info("No items to price")
             return
-        self.logger.info(f"Pricing {len(items)} items")
-        self._price_and_record(items)
+
+        due = items if force else self._due_for_refresh(items)
+        if skipped := len(items) - len(due):
+            self.logger.info(
+                f"Skipping {skipped} item(s) checked within the last "
+                f"{self.ctrl.refresh_rate_h}h"
+            )
+        if not due:
+            return
+
+        self.logger.info(f"Pricing {len(due)} items")
+        self._price_and_record(due)
+
+    def _due_for_refresh(self, items: list[Item]) -> list[Item]:
+        """Items never checked, or last checked over ``refresh_rate_h`` ago."""
+        last_checked = self.history.last_checked()
+        cutoff = datetime.now() - timedelta(hours=self.ctrl.refresh_rate_h)
+        return [
+            item
+            for item in items
+            if (seen := last_checked.get((item.name, item.website))) is None
+            or seen <= cutoff
+        ]
 
     def poll(self) -> None:
         """Price only items added to the sheet since the last check."""
@@ -185,6 +212,14 @@ def args_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run a single update and exit instead of starting the poll loop",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Re-price every item even if checked within refresh_rate_h. "
+            "Each lookup costs a billed search."
+        ),
+    )
     return parser
 
 
@@ -195,7 +230,7 @@ def main() -> None:
     try:
         monitor = PriceMonitor(secrets=args.secrets.expanduser(), logger=logger)
         if args.once:
-            monitor.update()
+            monitor.update(force=args.force)
             return
         monitor.start()
         monitor.thread.join()

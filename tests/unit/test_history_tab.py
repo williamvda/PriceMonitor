@@ -361,3 +361,72 @@ def test_read_fills_nan_with_empty_string(logger):
     result = tab.read()
     assert result.iloc[0]["status"] == ""
     assert not result.isna().any().any()
+
+
+def _checked_row(item: str, timestamp: str, status: str = "ok") -> dict:
+    return {
+        "timestamp": timestamp,
+        "item": item,
+        "website": "shop.example",
+        "price": "100.00",
+        "currency": "GBP",
+        "source_url": "",
+        "note": "",
+        "status": status,
+    }
+
+
+def test_last_checked_is_empty_for_an_empty_history(logger):
+    tab = HistoryTab(FakeSheet(), "Prices", logger)
+    assert tab.last_checked() == {}
+
+
+def test_last_checked_returns_the_newest_timestamp_per_item(logger):
+    frame = _history(
+        [
+            _checked_row("Widget", "2026-08-20 06:00:00"),
+            _checked_row("Widget", "2026-08-21 06:00:00"),
+            _checked_row("Gadget", "2026-08-19 06:00:00"),
+        ]
+    )
+    checked = HistoryTab(FakeSheet(frame), "Prices", logger).last_checked()
+    assert checked[("Widget", "shop.example")] == datetime(2026, 8, 21, 6, 0, 0)
+    assert checked[("Gadget", "shop.example")] == datetime(2026, 8, 19, 6, 0, 0)
+
+
+def test_last_checked_ignores_row_order(logger):
+    frame = _history(
+        [
+            _checked_row("Widget", "2026-08-21 06:00:00"),
+            _checked_row("Widget", "2026-08-20 06:00:00"),
+        ]
+    )
+    checked = HistoryTab(FakeSheet(frame), "Prices", logger).last_checked()
+    assert checked[("Widget", "shop.example")] == datetime(2026, 8, 21, 6, 0, 0)
+
+
+def test_last_checked_counts_failed_lookups(logger):
+    """A not_found row spent an API call, so it counts as a check."""
+    row = _checked_row("Widget", "2026-08-21 06:00:00", status="not_found")
+    row["price"] = ""
+    checked = HistoryTab(FakeSheet(_history([row])), "Prices", logger).last_checked()
+    assert checked[("Widget", "shop.example")] == datetime(2026, 8, 21, 6, 0, 0)
+
+
+def test_last_checked_drops_unparseable_timestamps(logger):
+    """Leaving the item absent makes it look unchecked, so it gets refreshed —
+    a hand-edited sheet must never silently suppress a lookup."""
+    frame = _history([_checked_row("Widget", "not a timestamp")])
+    assert HistoryTab(FakeSheet(frame), "Prices", logger).last_checked() == {}
+
+
+def test_last_checked_keeps_other_items_when_one_row_is_unparseable(logger):
+    frame = _history(
+        [
+            _checked_row("Widget", "broken"),
+            _checked_row("Gadget", "2026-08-21 06:00:00"),
+        ]
+    )
+    checked = HistoryTab(FakeSheet(frame), "Prices", logger).last_checked()
+    assert ("Widget", "shop.example") not in checked
+    assert checked[("Gadget", "shop.example")] == datetime(2026, 8, 21, 6, 0, 0)

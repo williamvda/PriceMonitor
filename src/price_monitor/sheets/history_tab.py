@@ -6,6 +6,7 @@ and rendered back as strings on write.
 """
 
 import logging
+from datetime import datetime
 
 import pandas as pd
 from py_utils.logger import get_child_logger
@@ -92,6 +93,27 @@ class HistoryTab:
             ordered = group.sort_values("timestamp", kind="stable")
             prices[key] = float(ordered["price"].iloc[-1])
         return prices
+
+    def last_checked(self) -> dict[tuple[str, str], datetime]:
+        """Most recent check time for each (item, website) pair, any status.
+
+        Any status counts: a failed lookup still spent an API call, so it must
+        still hold off the next one. Rows whose timestamp does not parse are
+        ignored, which leaves the item looking unchecked — a hand-edited sheet
+        should cause an extra refresh, never silently suppress one.
+        """
+        frame = self.read()
+        if frame.empty:
+            return {}
+        frame = frame.copy()
+        frame["_checked"] = pd.to_datetime(
+            frame["timestamp"], format=TIMESTAMP_FORMAT, errors="coerce"
+        )
+        frame = frame[frame["_checked"].notna()]
+        return {
+            key: group["_checked"].max().to_pydatetime()
+            for key, group in frame.groupby(["item", "website"], sort=False)
+        }
 
     def known_items(self) -> set[tuple[str, str]]:
         """Every (item, website) pair that has ever been recorded."""

@@ -3,7 +3,7 @@
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -270,3 +270,119 @@ def test_parser_accepts_once_flag():
     args = args_parser().parse_args(["--secrets", "/tmp/s", "--once"])
     assert args.once is True
     assert str(args.secrets) == "/tmp/s"
+
+
+def _history_row(item: str, when: datetime, status: str = "ok") -> dict[str, str]:
+    return {
+        "timestamp": when.strftime("%Y-%m-%d %H:%M:%S"),
+        "item": item,
+        "website": "shop.example",
+        "price": "100.00",
+        "currency": "GBP",
+        "source_url": "",
+        "note": "",
+        "status": status,
+    }
+
+
+def _sheet_with_history(rows: list[dict[str, str]], items: list[str]) -> FakeSheet:
+    return FakeSheet(
+        {
+            "Items": _items([{"item": n, "website": "shop.example"} for n in items]),
+            "Prices": pd.DataFrame(rows),
+        }
+    )
+
+
+def test_update_skips_an_item_checked_within_the_refresh_window(logger):
+    """Each lookup costs a billed search, so a recent check holds off the next."""
+    recent = datetime.now() - timedelta(hours=1)
+    sheet = _sheet_with_history([_history_row("Widget", recent)], ["Widget"])
+    searcher = FakeSearcher()
+    _monitor(sheet, searcher, logger).update()
+    assert searcher.priced == []
+
+
+def test_update_prices_an_item_checked_before_the_refresh_window(logger):
+    stale = datetime.now() - timedelta(hours=7)
+    sheet = _sheet_with_history([_history_row("Widget", stale)], ["Widget"])
+    searcher = FakeSearcher()
+    _monitor(sheet, searcher, logger).update()
+    assert searcher.priced == ["Widget"]
+
+
+def test_update_prices_an_item_with_no_history_at_all(logger):
+    recent = datetime.now() - timedelta(hours=1)
+    sheet = _sheet_with_history([_history_row("Widget", recent)], ["Widget", "Gadget"])
+    searcher = FakeSearcher()
+    _monitor(sheet, searcher, logger).update()
+    assert searcher.priced == ["Gadget"]
+
+
+def test_force_re_prices_everything_regardless_of_recency(logger):
+    recent = datetime.now() - timedelta(hours=1)
+    sheet = _sheet_with_history([_history_row("Widget", recent)], ["Widget"])
+    searcher = FakeSearcher()
+    _monitor(sheet, searcher, logger).update(force=True)
+    assert searcher.priced == ["Widget"]
+
+
+def test_a_failed_check_still_holds_off_the_next_one(logger):
+    """A not_found lookup spent an API call just as an ok one did, so it must
+    count as a check — otherwise a failing item is retried on every run."""
+    recent = datetime.now() - timedelta(hours=1)
+    row = _history_row("Widget", recent, status="not_found")
+    row["price"] = ""
+    sheet = _sheet_with_history([row], ["Widget"])
+    searcher = FakeSearcher()
+    _monitor(sheet, searcher, logger).update()
+    assert searcher.priced == []
+
+
+def test_recency_uses_the_newest_row_not_the_last_one(logger):
+    """Rows can land out of order; the most recent check is what matters."""
+    rows = [
+        _history_row("Widget", datetime.now() - timedelta(hours=1)),
+        _history_row("Widget", datetime.now() - timedelta(hours=9)),
+    ]
+    searcher = FakeSearcher()
+    _monitor(_sheet_with_history(rows, ["Widget"]), searcher, logger).update()
+    assert searcher.priced == []
+
+
+def test_an_unparseable_timestamp_does_not_suppress_a_refresh(logger):
+    """A hand-edited sheet should cause an extra lookup, never a silent skip."""
+    row = _history_row("Widget", datetime.now())
+    row["timestamp"] = "yesterday-ish"
+    sheet = _sheet_with_history([row], ["Widget"])
+    searcher = FakeSearcher()
+    _monitor(sheet, searcher, logger).update()
+    assert searcher.priced == ["Widget"]
+
+
+def test_skipping_every_item_writes_nothing(logger):
+    recent = datetime.now() - timedelta(hours=1)
+    sheet = _sheet_with_history([_history_row("Widget", recent)], ["Widget"])
+    before = len(sheet.tabs["Prices"])
+    _monitor(sheet, FakeSearcher(), logger).update()
+    assert len(sheet.tabs["Prices"]) == before
+
+
+def test_poll_still_prices_a_brand_new_item(logger):
+    """poll() handles items with no history, so the recency filter must not
+    reach it — a newly added item is priced immediately, not in six hours."""
+    recent = datetime.now() - timedelta(hours=1)
+    sheet = _sheet_with_history([_history_row("Widget", recent)], ["Widget", "Gadget"])
+    sheet.modified = True
+    searcher = FakeSearcher()
+    _monitor(sheet, searcher, logger).poll()
+    assert searcher.priced == ["Gadget"]
+
+
+def test_parser_accepts_force():
+    args = args_parser().parse_args(["--secrets", "/tmp/s", "--once", "--force"])
+    assert args.force is True
+
+
+def test_force_defaults_to_off():
+    assert args_parser().parse_args(["--secrets", "/tmp/s"]).force is False
