@@ -36,14 +36,21 @@ class ItemsTab:
         items: list[Item] = []
         seen: set[tuple[str, str]] = set()
         for position, row in enumerate(frame.to_dict("records"), start=2):
-            name = str(row.get("item") or "").strip()
-            website = str(row.get("website") or "").strip()
+            # pd.isna() handles None, NaN, NaT; bool(float('nan')) is True so
+            # the falsy check would not catch pandas' missing value representation.
+            if pd.isna(row.get("item")) or pd.isna(row.get("website")):
+                self.logger.warning(f"Row {position}: blank item or website, skipping")
+                continue
+            name = str(row.get("item")).strip()
+            website = str(row.get("website")).strip()
             if not name or not website:
                 self.logger.warning(f"Row {position}: blank item or website, skipping")
                 continue
             key = (name, website)
             if key in seen:
-                self.logger.warning(f"Row {position}: duplicate '{name}', skipping")
+                self.logger.warning(
+                    f"Row {position}: duplicate ('{name}', '{website}'), skipping"
+                )
                 continue
             seen.add(key)
             items.append(Item(name=name, website=website))

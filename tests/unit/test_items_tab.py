@@ -73,14 +73,21 @@ def test_surrounding_whitespace_is_trimmed(logger):
     ]
 
 
-def test_duplicate_pairs_are_deduplicated(logger):
+def test_duplicate_pairs_are_deduplicated(logger, caplog):
     frame = _items_frame(
         [
             {"item": "Widget", "website": "shop.example"},
             {"item": "Widget", "website": "shop.example"},
         ]
     )
-    assert len(ItemsTab(FakeSheet(frame), "Items", logger).read()) == 1
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        items = ItemsTab(FakeSheet(frame), "Items", logger).read()
+    assert len(items) == 1
+    assert any(
+        "duplicate ('Widget', 'shop.example')" in record.message
+        for record in caplog.records
+    )
 
 
 def test_same_item_on_two_sites_is_kept(logger):
@@ -144,3 +151,59 @@ def test_summary_row_order_follows_the_items_list(logger):
     ]
     ItemsTab(sheet, "Items", logger).write_summary(items, pd.DataFrame())
     assert list(sheet.frame["item"]) == ["B", "A"]
+
+
+def test_none_item_is_skipped_with_warning(logger, caplog):
+    frame = _items_frame(
+        [
+            {"item": None, "website": "shop.example"},
+            {"item": "Widget", "website": "shop.example"},
+        ]
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        items = ItemsTab(FakeSheet(frame), "Items", logger).read()
+    assert items == [Item(name="Widget", website="shop.example")]
+    assert any("blank item or website" in record.message for record in caplog.records)
+
+
+def test_none_website_is_skipped_with_warning(logger, caplog):
+    frame = _items_frame(
+        [
+            {"item": "Widget", "website": None},
+            {"item": "Gadget", "website": "shop.example"},
+        ]
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        items = ItemsTab(FakeSheet(frame), "Items", logger).read()
+    assert items == [Item(name="Gadget", website="shop.example")]
+    assert any("blank item or website" in record.message for record in caplog.records)
+
+
+def test_nan_item_is_skipped_with_warning(logger, caplog):
+    frame = _items_frame(
+        [
+            {"item": float("nan"), "website": "shop.example"},
+            {"item": "Widget", "website": "shop.example"},
+        ]
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        items = ItemsTab(FakeSheet(frame), "Items", logger).read()
+    assert items == [Item(name="Widget", website="shop.example")]
+    assert any("blank item or website" in record.message for record in caplog.records)
+
+
+def test_ragged_frame_from_api_does_not_create_nan_items(logger, caplog):
+    # Simulates what GoogleSheetInterface.read() does: builds DataFrame from
+    # ragged rows where trailing cells are omitted, padding with NaN.
+    frame = pd.DataFrame(
+        [["Widget", "shop.example"], ["Gadget"]], columns=["item", "website"]
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        items = ItemsTab(FakeSheet(frame), "Items", logger).read()
+    # Only the complete row should be kept; the ragged row skipped
+    assert items == [Item(name="Widget", website="shop.example")]
+    assert any("blank item or website" in record.message for record in caplog.records)
