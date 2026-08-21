@@ -1,0 +1,25 @@
+{
+  "config": {
+    "drive_config": {
+      "service_file": "service_account.json",
+      "remote_file": "PriceMonitor"
+    },
+    "llm_config": {
+      "provider": "gemini_search",
+      "model": "gemini-3.7-flash",
+      "api_key": "<fernet-encrypted-token — see README 'Encrypting the API key'>",
+      "max_tokens": 1024,
+      "temperature": 0.0
+    },
+    "price_ctrl": {
+      "refresh_rate_h": 6,
+      "poll_rate_m": 5,
+      "items_sheet": "Items",
+      "history_sheet": "Prices",
+      "currency": "GBP",
+      "suspect_threshold": 0.5,
+      "max_plausible_price": 100000,
+      "request_delay_s": 2
+    }
+  }
+}

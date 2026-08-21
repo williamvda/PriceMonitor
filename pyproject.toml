@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "price-monitor"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "py-utils @ git+https://github.com/williamvda/py-utils.git@v0.1.1",
+    "google-drive-api @ git+https://github.com/williamvda/google-drive-api.git@v0.1.2",
+    "llmbridge",
+    "pandas",
+    "python-dotenv",
+]
+
+[project.scripts]
+price-monitor = "price_monitor.price_monitor:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "black>=24.0", "isort>=5.13", "flake8>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-v -m 'not integration'"
+markers = [
+    "integration: live tests against external APIs (run with -m integration)",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
