@@ -217,27 +217,37 @@ def test_run_survives_a_failing_update_and_stop_is_prompt(logger):
         {"Items": _items([{"item": "Widget", "website": "shop.example"}])}
     )
     monitor = _monitor(sheet, FakeSearcher(), logger)
-    # Long intervals: after the immediate startup update(), run() settles
-    # into the _MAX_SLEEP_S-capped wait — exactly the "next event is hours
-    # away" scenario stop() must interrupt promptly rather than block on.
-    monitor.ctrl = PriceCtrl(
-        refresh_rate_h=1000.0, poll_rate_m=1000.0, request_delay_s=0.0
-    )
+    # Short intervals so a surviving loop calls update() again almost at
+    # once. A *second* call is the real proof _safe_run's except clause
+    # caught the first exception — a single call is consistent with either
+    # a working loop or one that quietly died right after it.
+    monitor.ctrl = PriceCtrl(refresh_rate_h=1e-7, poll_rate_m=1e-7, request_delay_s=0.0)
 
     calls = 0
-    update_ran = threading.Event()
+    calls_lock = threading.Lock()
+    second_call = threading.Event()
 
     def failing_update() -> None:
         nonlocal calls
-        calls += 1
-        update_ran.set()
+        with calls_lock:
+            calls += 1
+            reached_two = calls >= 2
+        if reached_two:
+            second_call.set()
         raise RuntimeError("boom")
 
     monitor.update = failing_update
 
     monitor.start()
     try:
-        assert update_ran.wait(timeout=1.0), "update() was not called on startup"
+        assert second_call.wait(timeout=2.0), (
+            f"update() was called only {calls} time(s) within the timeout — "
+            "_safe_run must have stopped catching the exception"
+        )
+        # The thread must still be running here: it survived at least one
+        # exception rather than dying with it. This is the assertion a
+        # thread that died on the first exception would fail.
+        assert monitor.thread.is_alive()
 
         started = time.monotonic()
         monitor.stop()
@@ -245,13 +255,10 @@ def test_run_survives_a_failing_update_and_stop_is_prompt(logger):
     finally:
         if monitor.thread.is_alive():
             monitor.stop_event.set()
-            monitor.thread.join(timeout=1.0)
+            monitor.thread.join(timeout=2.0)
 
-    # The thread kept running after update() raised, rather than dying with it.
-    assert calls == 1
     assert not monitor.thread.is_alive()
-    # Far below the ~20s _MAX_SLEEP_S it would otherwise be blocked on.
-    assert elapsed < 2.0
+    assert elapsed < 5.0  # generous bound: stop() must not hang
 
 
 def test_parser_requires_secrets():

@@ -15,7 +15,6 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from dotenv import load_dotenv
 from google_drive_api import GoogleSheetInterface
 from py_utils.logger import consoleLogger, get_child_logger
 
@@ -36,13 +35,9 @@ class PriceMonitor:
 
     def __init__(self, secrets: Path, logger: logging.Logger) -> None:
         self.logger = get_child_logger(logger, self.__class__.__name__)
-        # Not what makes EncStr decryption work: py_utils.config.load_config
-        # reads ENCRYPTION_KEY straight off disk via dotenv_values(), never
-        # from os.environ, so this call order has no bearing on decryption.
-        # It is here only so any other .env-configured setting a dependency
-        # reads from os.environ (proxy settings, log levels, etc.) is
-        # available once PriceMonitor starts.
-        load_dotenv(dotenv_path=(secrets / ".env"))
+        # No load_dotenv() here: py_utils.load_config reads secrets/.env
+        # directly via dotenv_values() for ENCRYPTION_KEY, so nothing needs
+        # loading into the process environment at this call site.
         config = load_price_config(secrets / "config.json")
 
         self.ctrl: PriceCtrl = config.price_ctrl
