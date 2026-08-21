@@ -19,7 +19,12 @@ def validate(
     last_price: float | None,
     fallback_urls: list[str],
 ) -> PriceReading:
-    """Grade ``payload`` against the plausibility ladder."""
+    """Grade ``payload`` against the plausibility ladder.
+
+    A price flagged ``vat_included: false`` has ``ctrl.vat_rate`` added before
+    any plausibility or movement check, so every recorded price — and every
+    comparison against ``last_price`` — is VAT-inclusive.
+    """
     source_url = str(payload.get("url") or "").strip()
     if not source_url:
         source_url = next(
@@ -58,6 +63,17 @@ def validate(
 
     if math.isnan(price) or math.isinf(price):
         return reading(None, PriceStatus.REJECTED, f"price was {price}")
+
+    # Recorded history is always VAT-inclusive, so a run that read an ex-VAT
+    # figure stays comparable with one that read the inc-VAT figure for the
+    # same product. Absent vat_included, assume the price already includes VAT
+    # — adding tax to an inclusive price would invent a jump that never
+    # happened, which is the worse of the two errors.
+    if payload.get("vat_included", True) is False:
+        ex_vat = price
+        price = round(price * (1 + ctrl.vat_rate), 2)
+        vat_note = f"ex-VAT {ex_vat:g} +{ctrl.vat_rate:.0%} VAT"
+        note = f"{note}; {vat_note}" if note else vat_note
 
     if price <= 0 or price > ctrl.max_plausible_price:
         return reading(None, PriceStatus.REJECTED, f"implausible price {price}")

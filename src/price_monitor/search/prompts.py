@@ -14,8 +14,13 @@ Site to search: {website}
 
 Search that site and report:
 - the price shown right now, with its currency
+- whether that price includes VAT (sales tax)
 - the exact URL of the page you read the price from
 - whether it is in stock
+
+If the page shows both a VAT-inclusive and a VAT-exclusive price, report the
+VAT-inclusive one and say so. If it shows only one, report it and say which
+kind it is. Do not calculate VAT yourself.
 
 If you cannot find the product on that site, say so plainly.
 Do not guess a price. Report only a price you actually saw."""
@@ -27,8 +32,13 @@ Page: {website}
 
 Read that page and report:
 - the price shown right now, with its currency
+- whether that price includes VAT (sales tax)
 - the exact URL you read the price from
 - whether it is in stock
+
+If the page shows both a VAT-inclusive and a VAT-exclusive price, report the
+VAT-inclusive one and say so. If it shows only one, report it and say which
+kind it is. Do not calculate VAT yourself.
 
 If the page does not show a price, say so plainly.
 Do not guess a price. Report only a price you actually saw."""
@@ -41,12 +51,17 @@ Schema:
   "currency": "<ISO 4217 code>",
   "url": "<string>",
   "in_stock": <true or false>,
+  "vat_included": <true or false>,
   "found": <true or false>,
   "note": "<string>"
 }}
 
 Rules:
 - Set found to false when the report gives no price; price is then null.
+- vat_included records whether the reported price already includes VAT. Set it
+  from what the report says; when the report does not say, set it to true so no
+  tax is added to a price that may already include it. Never adjust price
+  yourself — report the figure as given and let vat_included describe it.
 - price is a plain number: no currency symbol, no thousands separators.
 - url is the page the price was read from. Use one of the known source URLs
   below if the report does not name a page.

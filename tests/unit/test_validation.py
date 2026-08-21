@@ -151,3 +151,56 @@ def test_fallback_urls_skips_none_entries():
     reading = _validate(_payload(url=""), urls=[None, "https://second.example/p"])
     assert reading.source_url == "https://second.example/p"
     assert isinstance(reading.source_url, str)
+
+
+def test_vat_is_added_when_the_price_excludes_it():
+    reading = _validate(_payload(price=299.99, vat_included=False))
+    assert reading.status == PriceStatus.OK
+    assert reading.price == 359.99
+    assert "ex-VAT 299.99 +20% VAT" in reading.note
+
+
+def test_vat_is_not_added_when_the_price_includes_it():
+    reading = _validate(_payload(price=359.99, vat_included=True))
+    assert reading.status == PriceStatus.OK
+    assert reading.price == 359.99
+    assert reading.note == ""
+
+
+def test_missing_vat_flag_leaves_the_price_alone():
+    """Absent the flag, assume inclusive: inflating an already-inclusive price
+    would fabricate a 20% jump, which is worse than under-reporting."""
+    payload = _payload(price=359.99)
+    payload.pop("vat_included", None)
+    reading = _validate(payload)
+    assert reading.price == 359.99
+    assert reading.note == ""
+
+
+def test_vat_note_is_appended_to_an_existing_note():
+    reading = _validate(_payload(price=100.0, vat_included=False, note="last one"))
+    assert reading.note == "last one; ex-VAT 100 +20% VAT"
+
+
+def test_vat_rate_is_configurable():
+    ctrl = PriceCtrl(vat_rate=0.05)
+    reading = validate(
+        _payload(price=100.0, vat_included=False), ITEM, NOW, ctrl, None, []
+    )
+    assert reading.price == 105.0
+    assert "+5% VAT" in reading.note
+
+
+def test_suspect_check_compares_the_vat_inclusive_price():
+    """last_price is stored inc-VAT, so the movement check must run after the
+    adjustment — otherwise an ex-VAT reading looks like a 20% drop."""
+    reading = _validate(_payload(price=299.99, vat_included=False), last_price=359.99)
+    assert reading.status == PriceStatus.OK
+
+
+def test_vat_adjustment_can_push_a_price_past_the_plausibility_ceiling():
+    ctrl = PriceCtrl(max_plausible_price=350.0)
+    reading = validate(
+        _payload(price=299.99, vat_included=False), ITEM, NOW, ctrl, None, []
+    )
+    assert reading.status == PriceStatus.REJECTED
