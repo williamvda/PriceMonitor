@@ -1,16 +1,20 @@
 """Tests for the PriceMonitor controller: timing, orchestration, and the CLI parser."""
 
 import logging
+import threading
+import time
+from datetime import datetime
 
 import pandas as pd
 import pytest
 
+from price_monitor.app_config import PriceCtrl
 from price_monitor.models import Item, PriceReading, PriceStatus
 from price_monitor.price_monitor import PriceMonitor, args_parser
 
 
 class FakeSheet:
-    def __init__(self, tabs: dict[str, pd.DataFrame]):
+    def __init__(self, tabs: dict[str, pd.DataFrame]) -> None:
         self.tabs = tabs
         self.modified = False
 
@@ -28,10 +32,12 @@ class FakeSheet:
 
 
 class FakeSearcher:
-    def __init__(self):
+    def __init__(self) -> None:
         self.priced: list[str] = []
 
-    def price(self, item: Item, last_price, timestamp) -> PriceReading:
+    def price(
+        self, item: Item, last_price: float | None, timestamp: datetime
+    ) -> PriceReading:
         self.priced.append(item.name)
         return PriceReading(
             timestamp=timestamp,
@@ -45,15 +51,17 @@ class FakeSearcher:
 
 
 @pytest.fixture
-def logger():
+def logger() -> logging.Logger:
     return logging.getLogger("test")
 
 
-def _monitor(sheet, searcher, logger) -> PriceMonitor:
+def _monitor(
+    sheet: FakeSheet, searcher: FakeSearcher, logger: logging.Logger
+) -> PriceMonitor:
     return PriceMonitor.for_test(gsheet=sheet, searcher=searcher, logger=logger)
 
 
-def _items(rows):
+def _items(rows: list[dict[str, str]]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["item", "website"])
 
 
@@ -137,7 +145,9 @@ def test_poll_prices_only_the_new_item(logger):
 
 def test_a_failing_item_does_not_stop_the_others(logger):
     class Exploding(FakeSearcher):
-        def price(self, item, last_price, timestamp):
+        def price(
+            self, item: Item, last_price: float | None, timestamp: datetime
+        ) -> PriceReading:
             if item.name == "Widget":
                 raise RuntimeError("boom")
             return super().price(item, last_price, timestamp)
@@ -163,7 +173,9 @@ def test_last_price_is_passed_to_the_searcher(logger):
     seen = {}
 
     class Recording(FakeSearcher):
-        def price(self, item, last_price, timestamp):
+        def price(
+            self, item: Item, last_price: float | None, timestamp: datetime
+        ) -> PriceReading:
             seen[item.name] = last_price
             return super().price(item, last_price, timestamp)
 
@@ -198,6 +210,48 @@ def test_last_price_is_passed_to_the_searcher(logger):
     )
     _monitor(sheet, Recording(), logger).update()
     assert seen["Widget"] == 80.0
+
+
+def test_run_survives_a_failing_update_and_stop_is_prompt(logger):
+    sheet = FakeSheet(
+        {"Items": _items([{"item": "Widget", "website": "shop.example"}])}
+    )
+    monitor = _monitor(sheet, FakeSearcher(), logger)
+    # Long intervals: after the immediate startup update(), run() settles
+    # into the _MAX_SLEEP_S-capped wait — exactly the "next event is hours
+    # away" scenario stop() must interrupt promptly rather than block on.
+    monitor.ctrl = PriceCtrl(
+        refresh_rate_h=1000.0, poll_rate_m=1000.0, request_delay_s=0.0
+    )
+
+    calls = 0
+    update_ran = threading.Event()
+
+    def failing_update() -> None:
+        nonlocal calls
+        calls += 1
+        update_ran.set()
+        raise RuntimeError("boom")
+
+    monitor.update = failing_update
+
+    monitor.start()
+    try:
+        assert update_ran.wait(timeout=1.0), "update() was not called on startup"
+
+        started = time.monotonic()
+        monitor.stop()
+        elapsed = time.monotonic() - started
+    finally:
+        if monitor.thread.is_alive():
+            monitor.stop_event.set()
+            monitor.thread.join(timeout=1.0)
+
+    # The thread kept running after update() raised, rather than dying with it.
+    assert calls == 1
+    assert not monitor.thread.is_alive()
+    # Far below the ~20s _MAX_SLEEP_S it would otherwise be blocked on.
+    assert elapsed < 2.0
 
 
 def test_parser_requires_secrets():

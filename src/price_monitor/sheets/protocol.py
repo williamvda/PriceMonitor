@@ -21,3 +21,15 @@ class SheetInterface(Protocol):
     def write(self, sheet_name: str, df: pd.DataFrame) -> None: ...
 
     def update(self, sheet_name: str, df: pd.DataFrame) -> None: ...
+
+
+class MonitoredSheetInterface(SheetInterface, Protocol):
+    """The controller's wider view: a :class:`SheetInterface` that also
+    reports whether the underlying file has changed since it was last
+    checked. Only :mod:`price_monitor.price_monitor` needs ``is_modified``
+    for its poll cycle — ``ItemsTab`` and ``HistoryTab`` never call it, so it
+    stays off the shared ``SheetInterface`` rather than forcing every
+    tab-module fake to implement a method it does not use.
+    """
+
+    def is_modified(self) -> bool: ...

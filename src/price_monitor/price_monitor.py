@@ -24,7 +24,7 @@ from price_monitor.models import Item, PriceReading, PriceStatus
 from price_monitor.search.searcher import PriceSearcher
 from price_monitor.sheets.history_tab import HistoryTab
 from price_monitor.sheets.items_tab import ItemsTab
-from price_monitor.sheets.protocol import SheetInterface
+from price_monitor.sheets.protocol import MonitoredSheetInterface
 
 # Wake at least this often so stop() is honoured promptly even when the next
 # scheduled event is hours away.
@@ -36,13 +36,17 @@ class PriceMonitor:
 
     def __init__(self, secrets: Path, logger: logging.Logger) -> None:
         self.logger = get_child_logger(logger, self.__class__.__name__)
-        # Must precede any decryption: EncStr fields are decrypted with the
-        # key this puts into the environment.
+        # Not what makes EncStr decryption work: py_utils.config.load_config
+        # reads ENCRYPTION_KEY straight off disk via dotenv_values(), never
+        # from os.environ, so this call order has no bearing on decryption.
+        # It is here only so any other .env-configured setting a dependency
+        # reads from os.environ (proxy settings, log levels, etc.) is
+        # available once PriceMonitor starts.
         load_dotenv(dotenv_path=(secrets / ".env"))
         config = load_price_config(secrets / "config.json")
 
         self.ctrl: PriceCtrl = config.price_ctrl
-        gsheet: SheetInterface = GoogleSheetInterface(
+        gsheet: MonitoredSheetInterface = GoogleSheetInterface(
             config=config.drive_config, logger=logger
         )
         self._init_parts(
@@ -52,7 +56,10 @@ class PriceMonitor:
 
     @classmethod
     def for_test(
-        cls, gsheet: SheetInterface, searcher: PriceSearcher, logger: logging.Logger
+        cls,
+        gsheet: MonitoredSheetInterface,
+        searcher: PriceSearcher,
+        logger: logging.Logger,
     ) -> "PriceMonitor":
         """Build a controller around fakes, skipping config and network setup."""
         monitor = cls.__new__(cls)
@@ -61,7 +68,9 @@ class PriceMonitor:
         monitor._init_parts(gsheet=gsheet, searcher=searcher)
         return monitor
 
-    def _init_parts(self, gsheet: SheetInterface, searcher: PriceSearcher) -> None:
+    def _init_parts(
+        self, gsheet: MonitoredSheetInterface, searcher: PriceSearcher
+    ) -> None:
         self._searcher = searcher
         self.items_tab = ItemsTab(gsheet, self.ctrl.items_sheet, self.logger)
         self.history = HistoryTab(gsheet, self.ctrl.history_sheet, self.logger)
