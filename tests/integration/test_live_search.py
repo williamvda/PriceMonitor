@@ -5,6 +5,7 @@ Requires PRICE_MONITOR_SECRETS to point at a configured secrets directory.
 """
 
 import logging
+from dataclasses import replace
 from datetime import datetime
 
 import pandas as pd
@@ -22,6 +23,16 @@ _SCRATCH_HISTORY_TAB = "_price_monitor_integration_scratch_history"
 
 
 def test_grounded_lookup_returns_a_usable_reading(config, logger):
+    """A grounded lookup of a widely-stocked product must find a price.
+
+    NOT_FOUND is deliberately *not* accepted here. It is the outcome the
+    un-grounded path returns for everything, so allowing it would let this
+    test pass green while proving nothing about grounding — the whole reason
+    the test exists.
+    """
+    if not config.llm_config.grounded:
+        pytest.skip("grounding disabled in config — cannot verify the grounded path")
+
     searcher = PriceSearcher(config.llm_config, config.price_ctrl, logger)
     item = Item(name="Sony WH-1000XM5 headphones", website="amazon.co.uk")
     reading = searcher.price(item, None, datetime.now().replace(microsecond=0))
@@ -29,13 +40,35 @@ def test_grounded_lookup_returns_a_usable_reading(config, logger):
     assert reading.status in {
         PriceStatus.OK,
         PriceStatus.SUSPECT,
-        PriceStatus.NOT_FOUND,
         PriceStatus.WRONG_CURRENCY,
     }, f"unexpected status {reading.status}: {reading.note}"
 
     if reading.status in {PriceStatus.OK, PriceStatus.SUSPECT}:
         assert reading.price is not None and reading.price > 0
         assert reading.source_url.startswith("http")
+
+
+def test_ungrounded_lookup_completes_without_error(config, logger):
+    """The un-grounded path must run cleanly on a key with no search quota.
+
+    Forces grounding off regardless of config, so this covers the fallback
+    whichever way the deployment is currently set. It asserts only that the
+    two-call pipeline completes and grades itself — an un-grounded model has
+    no live sources, so NOT_FOUND is the honest and expected result, and a
+    price is not required. ERROR/PARSE_ERROR mean the plumbing broke.
+    """
+    llm_config = replace(config.llm_config, grounded=False)
+    searcher = PriceSearcher(llm_config, config.price_ctrl, logger)
+    item = Item(name="Sony WH-1000XM5 headphones", website="amazon.co.uk")
+    reading = searcher.price(item, None, datetime.now().replace(microsecond=0))
+
+    assert reading.status not in {
+        PriceStatus.ERROR,
+        PriceStatus.PARSE_ERROR,
+    }, f"un-grounded pipeline failed: {reading.note}"
+
+    if reading.price is not None:
+        assert reading.price > 0
 
 
 def test_sheet_round_trip(config, logger, gsheet):

@@ -19,9 +19,16 @@ class LLMConfig:
 
     ``provider`` names the grounded search provider used for call 1. Call 2
     always uses the stock ``gemini`` provider with the same model and key.
+
+    ``grounded`` switches call 1 between ``provider`` and the un-grounded
+    stock ``gemini`` provider. Turning it off makes the lookup work on a key
+    whose project has no Google Search grounding quota, at the cost of the
+    audit trail: an un-grounded model has no cited sources, so ``source_url``
+    is whatever it claims rather than a page it actually read.
     """
 
     api_key: EncStr
+    grounded: bool = True
     provider: str = "gemini_search"
     model: str = "gemini-3.7-flash"
     max_tokens: int = 1024
