@@ -10,8 +10,11 @@ from datetime import datetime
 
 import pandas as pd
 import pytest
+from llmbridge import LLMClient
 
 from price_monitor.models import Item, PriceReading, PriceStatus
+from price_monitor.search.gemini_search import grounding_urls
+from price_monitor.search.prompts import search_prompt
 from price_monitor.search.searcher import PriceSearcher
 from price_monitor.sheets.history_tab import COLUMNS, HistoryTab
 
@@ -31,28 +34,64 @@ _SCRATCH_HISTORY_TAB = "_price_monitor_integration_scratch_history"
 _LIVE_ITEM = Item(name="Epson EcoTank ET-4850", website="printerland.co.uk")
 
 
-def test_grounded_lookup_returns_a_usable_reading(config, logger):
-    """A grounded lookup of a widely-stocked product must find a price.
+class _Replay:
+    """Serves one already-fetched response, so call two runs for free."""
 
-    NOT_FOUND is deliberately *not* accepted here. It is the outcome the
-    un-grounded path returns for everything, so allowing it would let this
-    test pass green while proving nothing about grounding — the whole reason
-    the test exists.
+    def __init__(self, response) -> None:
+        self._response = response
+
+    def prompt(self, prompt_text: str, **kwargs):
+        return self._response
+
+
+def test_grounding_is_live_and_the_pipeline_grades_the_result(config, logger):
+    """Grounding executed, and the two-call pipeline graded what came back.
+
+    The load-bearing assertion is the presence of grounding citations, not a
+    price. ``groundingMetadata`` cannot appear unless the search tool actually
+    ran, so it goes red exactly when something real breaks — quota withdrawn,
+    the tool key wrong, the provider regressed — and stays green regardless of
+    whether one retailer happened to list a price today.
+
+    An earlier version required OK/SUSPECT/WRONG_CURRENCY. It failed on live
+    stock levels rather than on defects: the same item passed in the morning
+    and failed the same afternoon on unchanged code. A test that cannot tell
+    a breakage from a thin search index is not measuring this codebase.
+
+    Call one is issued directly so its raw response can be inspected, then
+    replayed into the searcher — the real format call and validation ladder
+    still run, and only one grounded search is spent.
     """
     if not config.llm_config.grounded:
         pytest.skip("grounding disabled in config — cannot verify the grounded path")
 
-    searcher = PriceSearcher(config.llm_config, config.price_ctrl, logger)
-    reading = searcher.price(_LIVE_ITEM, None, datetime.now().replace(microsecond=0))
+    llm = config.llm_config
+    searched = LLMClient(
+        provider=llm.provider,
+        api_key=llm.api_key,
+        model=llm.model,
+        max_tokens=llm.max_tokens,
+        temperature=llm.temperature,
+        timeout=llm.timeout,
+    ).prompt(search_prompt(_LIVE_ITEM))
 
-    assert reading.status in {
-        PriceStatus.OK,
-        PriceStatus.SUSPECT,
-        PriceStatus.WRONG_CURRENCY,
-    }, f"unexpected status {reading.status}: {reading.note}"
+    assert searched.text and searched.text.strip(), "grounded call returned no text"
+    assert grounding_urls(searched.raw_response), (
+        "no grounding citations returned — the search tool did not run. "
+        f"Reply was: {(searched.text or '')[:200]}"
+    )
 
-    if reading.status in {PriceStatus.OK, PriceStatus.SUSPECT}:
-        assert reading.price is not None and reading.price > 0
+    reading = PriceSearcher(
+        llm, config.price_ctrl, logger, search_client=_Replay(searched)
+    ).price(_LIVE_ITEM, None, datetime.now().replace(microsecond=0))
+
+    assert reading.status not in {
+        PriceStatus.ERROR,
+        PriceStatus.PARSE_ERROR,
+    }, f"pipeline failed on a grounded reply: {reading.note}"
+
+    if reading.price is not None:
+        assert reading.price > 0
         assert reading.source_url.startswith("http")
 
 
