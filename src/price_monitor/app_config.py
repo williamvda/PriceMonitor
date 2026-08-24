@@ -52,6 +52,19 @@ class PriceCtrl:
     max_plausible_price: float = 100000.0
     request_delay_s: float = 2.0
 
+@dataclass
+class MsgConfig:
+    """Connection settings for the MsgServer log forwarder.
+
+    All fields have defaults so a ``config.json`` without a ``msg_config``
+    section loads unchanged; the defaults assume the server runs on the same
+    host as PriceMonitor.
+    """
+
+    handle: str = "pm"
+    router_endpoint: str = "tcp://127.0.0.1:5555"
+    sub_endpoint: str = "tcp://127.0.0.1:5556"
+    timeout_ms: int = 2000
 
 @dataclass
 class Config:
@@ -60,6 +73,7 @@ class Config:
     drive_config: DriveConfig
     llm_config: LLMConfig
     price_ctrl: PriceCtrl = field(default_factory=PriceCtrl)
+    msg_config: MsgConfig = field(default_factory=MsgConfig)
 
 
 def load_price_config(path: Path) -> Config:

@@ -25,7 +25,13 @@ from price_monitor.search.searcher import PriceSearcher
 from price_monitor.sheets.history_tab import HistoryTab
 from price_monitor.sheets.items_tab import ItemsTab
 from price_monitor.sheets.protocol import MonitoredSheetInterface
-
+from price_monitor.msgserver_client.msg_forwarder import (
+    MsgNotifier,
+    attach_msg_server,
+    detach_msg_server,
+    format_startup_message,
+    format_update_summary,
+)
 # Wake at least this often so stop() is honoured promptly even when the next
 # scheduled event is hours away.
 _MAX_SLEEP_S = 20.0
@@ -34,12 +40,32 @@ _MAX_SLEEP_S = 20.0
 class PriceMonitor:
     """Polls a sheet of tracked items and records their prices over time."""
 
-    def __init__(self, secrets: Path, logger: logging.Logger) -> None:
+    def __init__(
+        self, 
+        secrets: Path, 
+        logger: logging.Logger,
+        msg_server: bool = False,
+    ) -> None:
+
         self.logger = get_child_logger(logger, self.__class__.__name__)
         # No load_dotenv() here: py_utils.load_config reads secrets/.env
         # directly via dotenv_values() for ENCRYPTION_KEY, so nothing needs
         # loading into the process environment at this call site.
         config = load_price_config(secrets / "config.json")
+
+        # Attached to the root logger, not the child, so records from every
+        # component propagate into it. Purely additive — console output is
+        # untouched whether or not the server is reachable.
+        self.root_logger = logger
+        self.msg_client = (
+            attach_msg_server(logger, config.msg_config)
+            if msg_server and logger is not None
+            else None
+        )
+        self.notifier = MsgNotifier(
+            self.msg_client, handle=config.msg_config.handle, logger=self.logger
+        )
+
 
         self.ctrl: PriceCtrl = config.price_ctrl
         gsheet: MonitoredSheetInterface = GoogleSheetInterface(
@@ -62,6 +88,8 @@ class PriceMonitor:
         monitor.logger = get_child_logger(logger, cls.__name__)
         monitor.ctrl = PriceCtrl(request_delay_s=0.0)
         monitor._init_parts(gsheet=gsheet, searcher=searcher)
+        monitor.msg_client = None
+        monitor.notifier = MsgNotifier(client=monitor.msg_client)
         return monitor
 
     def _init_parts(
@@ -135,6 +163,7 @@ class PriceMonitor:
 
         self.history.append(readings)
         self.items_tab.write_summary(self.items_tab.read(), self.history.summarise())
+        self.notifier.notify(format_update_summary(readings))
 
     def _price_one(self, item: Item, last_price: float | None) -> PriceReading:
         timestamp = datetime.now().replace(microsecond=0)
@@ -190,12 +219,17 @@ class PriceMonitor:
     def start(self) -> None:
         self.thread.start()
         self.logger.info("Start thread")
+        self.notifier.notify(format_startup_message())
+
 
     def stop(self) -> None:
         self.stop_event.set()
         if self.thread.is_alive():
             self.thread.join()
         self.logger.info("Stop thread")
+        if self.msg_client is not None:
+            detach_msg_server(self.root_logger, self.msg_client)
+            self.msg_client = None
 
 
 def args_parser() -> argparse.ArgumentParser:
@@ -207,6 +241,14 @@ def args_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         help="Directory holding config.json and .env",
+    )
+    parser.add_argument(
+        "--msg-server",
+        action="store_true",
+        help=(
+            "Send status messages and auth links to MsgServer, and forward "
+            "warnings and errors there as well as to the console"
+        ),
     )
     parser.add_argument(
         "--once",
@@ -246,7 +288,11 @@ def main() -> None:
     args = args_parser().parse_args()
     monitor = None
     try:
-        monitor = PriceMonitor(secrets=args.secrets.expanduser(), logger=logger)
+        monitor = PriceMonitor(
+            secrets=args.secrets.expanduser(), 
+            logger=logger,
+            msg_server=args.msg_server,
+            )
         if args.once:
             monitor.update(force=args.force)
             return
