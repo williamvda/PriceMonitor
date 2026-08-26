@@ -5,11 +5,14 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
-from price_monitor.app_config import load_price_config
+from price_monitor.app_config import MsgConfig, load_price_config
 
 
 def _write_config(
-    tmp_path: Path, price_ctrl: dict | None = None, encryption_key: str | None = None
+    tmp_path: Path,
+    price_ctrl: dict | None = None,
+    encryption_key: str | None = None,
+    msg_config: dict | None = None,
 ) -> Path:
     # EncStr fields use strict=True decryption, so they fail closed without a real
     # Fernet token. We encrypt test-key rather than write plaintext.
@@ -29,6 +32,8 @@ def _write_config(
     }
     if price_ctrl is not None:
         payload["config"]["price_ctrl"] = price_ctrl
+    if msg_config is not None:
+        payload["config"]["msg_config"] = msg_config
     path = tmp_path / "config.json"
     path.write_text(json.dumps(payload))
     return path
@@ -72,3 +77,36 @@ def test_drive_config_is_populated(tmp_path, monkeypatch):
     monkeypatch.setenv("ENCRYPTION_KEY", key)
     config = load_price_config(_write_config(tmp_path, encryption_key=key))
     assert config.drive_config.remote_file == "PriceMonitor"
+
+
+def test_missing_msg_config_section_falls_back_to_defaults(tmp_path, monkeypatch):
+    key = Fernet.generate_key().decode()
+    monkeypatch.setenv("ENCRYPTION_KEY", key)
+    config = load_price_config(_write_config(tmp_path, encryption_key=key))
+    assert config.msg_config == MsgConfig()
+    assert config.msg_config.handle == "pm"
+    assert config.msg_config.router_endpoint == "tcp://127.0.0.1:5555"
+
+
+def test_msg_config_values_override_defaults(tmp_path, monkeypatch):
+    key = Fernet.generate_key().decode()
+    monkeypatch.setenv("ENCRYPTION_KEY", key)
+    path = _write_config(
+        tmp_path,
+        encryption_key=key,
+        msg_config={"handle": "pm2", "router_endpoint": "tcp://box:6000"},
+    )
+    config = load_price_config(path)
+    assert config.msg_config.handle == "pm2"
+    assert config.msg_config.router_endpoint == "tcp://box:6000"
+    assert config.msg_config.timeout_ms == 2000
+
+
+def test_the_example_config_matches_the_schema(monkeypatch):
+    """config.example.json must stay loadable, or it misleads every new setup."""
+    key = Fernet.generate_key().decode()
+    monkeypatch.setenv("ENCRYPTION_KEY", key)
+    example = json.loads(
+        (Path(__file__).parents[2] / "config" / "config.example.json").read_text()
+    )
+    assert example["config"]["msg_config"]["handle"] == MsgConfig().handle
