@@ -22,6 +22,9 @@ price-monitor = "price_monitor.price_monitor:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "black>=24.0", "isort>=5.13", "flake8>=7.0"]
+# msgserver is a direct git reference rather than a plain name: it is not
+# published on PyPI. Only needed when running with --msg-server.
+msgserver = ["msgserver @ git+ssh://git@github.com/williamvda/MsgServer.git@v0.1.3"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

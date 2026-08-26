@@ -407,3 +407,154 @@ def test_sigterm_handler_sets_the_stop_event(logger):
     assert not monitor.stop_event.is_set()
     installed[signal.SIGTERM](signal.SIGTERM, None)
     assert monitor.stop_event.is_set()
+
+
+# --- MsgServer notifications -----------------------------------------------
+
+
+class RecordingNotifier:
+    """Captures notify() calls in place of a real MsgServer client."""
+
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    def notify(self, text: str) -> None:
+        self.messages.append(text)
+
+
+def _monitor_with_notifier(
+    sheet: FakeSheet, searcher: FakeSearcher, logger: logging.Logger
+) -> tuple[PriceMonitor, RecordingNotifier]:
+    monitor = _monitor(sheet, searcher, logger)
+    notifier = RecordingNotifier()
+    monitor.notifier = notifier
+    return monitor, notifier
+
+
+def test_for_test_monitor_has_notifications_disabled(logger):
+    monitor = _monitor(
+        FakeSheet({"Items": _items([{"item": "Widget", "website": "shop.example"}])}),
+        FakeSearcher(),
+        logger,
+    )
+    assert monitor.msg_client is None
+    assert monitor.notifier.enabled is False
+    monitor.update()  # the no-op notifier must not get in the way
+
+
+def test_update_brackets_the_check_with_start_and_complete(logger):
+    sheet = FakeSheet(
+        {
+            "Items": _items(
+                [
+                    {"item": "Widget", "website": "shop.example"},
+                    {"item": "Gadget", "website": "shop.example"},
+                ]
+            )
+        }
+    )
+    monitor, notifier = _monitor_with_notifier(sheet, FakeSearcher(), logger)
+    monitor.update()
+
+    assert notifier.messages == [
+        "⏳ PriceMonitor update started — 2 item(s)",
+        "✅ PriceMonitor update complete — 2/2 priced, 0 failed",
+    ]
+
+
+def test_a_failing_lookup_is_reported_as_a_failure(logger):
+    class BrokenSearcher(FakeSearcher):
+        def price(self, item, last_price, timestamp):
+            raise RuntimeError("site down")
+
+    sheet = FakeSheet(
+        {"Items": _items([{"item": "Widget", "website": "shop.example"}])}
+    )
+    monitor, notifier = _monitor_with_notifier(sheet, BrokenSearcher(), logger)
+    monitor.update()
+
+    assert notifier.messages[-1] == (
+        "❌ PriceMonitor update complete — 0/1 priced, 1 failed"
+    )
+
+
+def test_a_check_that_aborts_still_sends_a_failure_notice(logger):
+    sheet = FakeSheet(
+        {"Items": _items([{"item": "Widget", "website": "shop.example"}])}
+    )
+    monitor, notifier = _monitor_with_notifier(sheet, FakeSearcher(), logger)
+    monitor.history.append = mock.Mock(side_effect=RuntimeError("sheet unreachable"))
+
+    with pytest.raises(RuntimeError):
+        monitor.update()
+
+    assert notifier.messages[-1] == (
+        "❌ PriceMonitor update failed — sheet unreachable"
+    )
+
+
+def test_an_aborted_check_is_logged_and_retried_by_the_loop(logger):
+    """_safe_run must still see the exception the notifier re-raised."""
+    sheet = FakeSheet(
+        {"Items": _items([{"item": "Widget", "website": "shop.example"}])}
+    )
+    monitor, notifier = _monitor_with_notifier(sheet, FakeSearcher(), logger)
+    monitor.history.append = mock.Mock(side_effect=RuntimeError("sheet unreachable"))
+
+    monitor._safe_run("Update", monitor.update)  # must not propagate
+
+    assert notifier.messages[-1].startswith("❌ PriceMonitor update failed")
+
+
+def test_a_check_with_nothing_due_says_nothing(logger):
+    sheet = FakeSheet({"Items": _items([])})
+    monitor, notifier = _monitor_with_notifier(sheet, FakeSearcher(), logger)
+    monitor.update()
+    assert notifier.messages == []
+
+
+def test_an_idle_poll_says_nothing(logger):
+    sheet = FakeSheet(
+        {"Items": _items([{"item": "Widget", "website": "shop.example"}])}
+    )
+    monitor, notifier = _monitor_with_notifier(sheet, FakeSearcher(), logger)
+    sheet.modified = False
+    monitor.poll()
+    assert notifier.messages == []
+
+
+def test_a_poll_is_labelled_poll_not_update(logger):
+    sheet = FakeSheet(
+        {"Items": _items([{"item": "Widget", "website": "shop.example"}])}
+    )
+    monitor, notifier = _monitor_with_notifier(sheet, FakeSearcher(), logger)
+    sheet.modified = True
+    monitor.poll()
+
+    assert notifier.messages == [
+        "⏳ PriceMonitor poll started — 1 item(s)",
+        "✅ PriceMonitor poll complete — 1/1 priced, 0 failed",
+    ]
+
+
+def test_parser_accepts_msg_server_flag():
+    assert args_parser().parse_args(["--secrets", "/tmp/s", "--msg-server"]).msg_server
+    assert args_parser().parse_args(["--secrets", "/tmp/s"]).msg_server is False
+
+
+def test_once_still_tears_down_the_msg_client(monkeypatch):
+    """--once returns early; the finally must still close the forwarder."""
+    monitor = mock.Mock()
+    monkeypatch.setattr(
+        price_monitor_module, "PriceMonitor", mock.Mock(return_value=monitor)
+    )
+    monkeypatch.setattr("sys.argv", ["price-monitor", "--secrets", "/tmp/s", "--once"])
+
+    price_monitor_module.main()
+
+    monitor.update.assert_called_once_with(force=False)
+    monitor.stop.assert_called_once()

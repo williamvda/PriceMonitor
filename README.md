@@ -92,7 +92,15 @@ personal key.
 
 ```bash
 pip install ".[dev]"        # development, from a checkout
-pip install git+ssh://git@github.com/williamvda/PriceMonitor.git@master
+pip install git+ssh://git@github.com/williamvda/PriceMonitor.git@v0.1.0
+```
+
+The MsgServer client is an optional dependency needed only for `--msg-server`.
+Extras go on the whole requirement, and the string needs quoting for the shell:
+
+```bash
+pip install ".[dev,msgserver]"   # development, from a checkout
+pip install "price-monitor[msgserver] @ git+ssh://git@github.com/williamvda/PriceMonitor.git@v0.1.0"
 ```
 
 Verify the SSH access before installing, or pip will fail partway through with
