@@ -22,7 +22,7 @@
       "request_delay_s": 2
     },
     "msg_config": {
-      "handle": "sm",
+      "handle": "pm",
       "router_endpoint": "tcp://127.0.0.1:5555",
       "sub_endpoint": "tcp://127.0.0.1:5556",
       "timeout_ms": 2000

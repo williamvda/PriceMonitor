@@ -52,6 +52,7 @@ class PriceCtrl:
     max_plausible_price: float = 100000.0
     request_delay_s: float = 2.0
 
+
 @dataclass
 class MsgConfig:
     """Connection settings for the MsgServer log forwarder.
@@ -65,6 +66,7 @@ class MsgConfig:
     router_endpoint: str = "tcp://127.0.0.1:5555"
     sub_endpoint: str = "tcp://127.0.0.1:5556"
     timeout_ms: int = 2000
+
 
 @dataclass
 class Config:

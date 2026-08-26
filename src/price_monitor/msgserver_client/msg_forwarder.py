@@ -3,23 +3,28 @@
 Public surface: :class:`MsgServerHandler`, a logging handler that forwards each
 warning-or-above record to a MsgServer handle; :class:`MsgNotifier`, for
 deliberate status messages that are not log records; :func:`attach_msg_server`
-and :func:`detach_msg_server` for wiring and teardown; and
-:func:`format_update_summary` for rendering per-bank update outcomes. The
-handler is purely additive — records still reach every other handler on the
-logger, so console output is unchanged whether or not the server is reachable.
+and :func:`detach_msg_server` for wiring and teardown; and the
+``format_*`` helpers that render the start, complete, and failure notices for
+one pricing check. The handler is purely additive — records still reach every
+other handler on the logger, so console output is unchanged whether or not the
+server is reachable.
 """
 
 import logging
 import threading
 from typing import Any
 
-from price_monitor.models import Item, PriceReading, PriceStatus
 from price_monitor.app_config import MsgConfig
+from price_monitor.models import PriceReading, PriceStatus
 
 _MISSING_PACKAGE_HINT = (
     "The msgserver client is not installed. "
-    "Install it with: pip install 'finance-monitor[msgserver]'"
+    "Install it with: pip install 'price-monitor[msgserver]'"
 )
+
+# A reading with one of these statuses carries a usable price that was written
+# to the history tab; anything else produced no number for this run.
+_RECORDED_STATUSES = (PriceStatus.OK, PriceStatus.SUSPECT)
 
 
 class MsgServerHandler(logging.Handler):
@@ -33,7 +38,7 @@ class MsgServerHandler(logging.Handler):
     def __init__(
         self,
         client: Any,
-        handle: str = "fin_man",
+        handle: str = "pm",
         level: int = logging.WARNING,
     ) -> None:
         super().__init__(level=level)
@@ -89,24 +94,33 @@ class MsgNotifier:
 
 
 def format_startup_message() -> str:
-    """Render the message sent when the monitor starts."""
+    """Render the message sent when the monitor's poll loop starts."""
+    return "🟢 PriceMonitor started"
+
+
+def format_check_started(label: str, item_count: int) -> str:
+    """Render the notice sent when a pricing check begins."""
+    return f"⏳ PriceMonitor {label} started — {item_count} item(s)"
+
+
+def format_check_complete(label: str, readings: list[PriceReading]) -> str:
+    """Render the outcome of one pricing check as a plain-text message.
+
+    A reading that came back SUSPECT still produced a price, so it counts as
+    priced rather than failed — the flag is on the value, not the lookup.
+    """
+    total = len(readings)
+    priced = sum(1 for r in readings if r.status in _RECORDED_STATUSES)
+    icon = "✅" if priced == total else "❌"
     return (
-        f"🟢 PriceMonitor started"
+        f"{icon} PriceMonitor {label} complete — "
+        f"{priced}/{total} priced, {total - priced} failed"
     )
 
 
-def format_update_summary(stage_results: list[PriceReading]) -> str:
-    """Render per-bank outcomes for one update as a plain-text message.
-
-    A stage missing from ``stage_results`` did not run — most often
-    ``transactions``, which is skipped when no balance changed.
-    """
-    total = len(stage_results)
-    success = sum(1 for r in stage_results if r.status == PriceStatus.OK)
-    lines = [f"{'✅' if success == total else '❌'} PriceMonitor update complete"]
-    lines.append(f"[{success}/{total}] successful,")
-    lines.append(f"{(total - success)/total} failed.")
-    return "\n".join(lines)
+def format_check_failed(label: str, error: Exception) -> str:
+    """Render the notice sent when a check aborts before it could report."""
+    return f"❌ PriceMonitor {label} failed — {error}"
 
 
 def attach_msg_server(logger: logging.Logger, config: MsgConfig) -> Any:
@@ -139,9 +153,9 @@ def attach_msg_server(logger: logging.Logger, config: MsgConfig) -> Any:
     logger.addHandler(handler)
 
     if not client.ping():
-        logger.info("MsgServer unreachable at %s", config.router_endpoint)
+        logger.info(f"MsgServer unreachable at {config.router_endpoint}")
     else:
-        logger.info("MsgServer forwarding enabled on handle '%s'", config.handle)
+        logger.info(f"MsgServer forwarding enabled on handle '{config.handle}'")
 
     return client
 
