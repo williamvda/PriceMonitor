@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [ "master" ]
+    tags: [ "v*.*.*" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Linters are static — they need no project dependencies, and so no PAT.
+      - name: Install linters
+        run: pip install black isort flake8
+      - name: Run Black
+        run: black --check src tests
+      - name: Run isort
+        run: isort --check-only src tests
+      - name: Run flake8
+        run: flake8 src tests
+
+  tests:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # py-utils, google-drive-api and llmbridge are private repos pinned over
+      # ssh://, and a runner has no SSH key. Rewriting to https:// with a PAT
+      # lets pip clone them; a pinned tag that does not exist fails here, which
+      # is a deliberate and useful signal.
+      - name: Authenticate Git for private repos
+        run: git config --global url."https://${{ secrets.GH_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
+      - name: Install dependencies
+        run: pip install ".[dev]"
+      # pyproject's addopts already deselects the integration marker; the live
+      # tests would self-skip anyway without PRICE_MONITOR_SECRETS.
+      - name: Run unit tests
+        run: pytest
