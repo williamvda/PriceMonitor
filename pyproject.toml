@@ -11,7 +11,7 @@ dependencies = [
     # with read access to all three. Pinned to tags, never a branch — an
     # unpinned dependency means a redeploy can ship code no test has seen.
     "py-utils @ git+ssh://git@github.com/williamvda/py-utils.git@v0.1.4",
-    "google-drive-api @ git+ssh://git@github.com/williamvda/google-drive-api.git@v0.1.3",
+    "google-drive-api @ git+ssh://git@github.com/williamvda/google-drive-api.git@v0.1.4",
     "llmbridge @ git+ssh://git@github.com/williamvda/AIInterface.git@v0.1.0",
     "pandas",
     "python-dotenv",
