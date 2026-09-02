@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "price-monitor"
-version = "0.1.0"
+version = "0.1.5"
 requires-python = ">=3.11"
 dependencies = [
     # Private repos, so SSH rather than HTTPS: the installing host needs a key
     # with read access to all three. Pinned to tags, never a branch — an
     # unpinned dependency means a redeploy can ship code no test has seen.
     "py-utils @ git+ssh://git@github.com/williamvda/py-utils.git@v0.1.4",
-    "google-drive-api @ git+ssh://git@github.com/williamvda/google-drive-api.git@v0.1.4",
+    "google-drive-api @ git+ssh://git@github.com/williamvda/google-drive-api.git@v0.1.5",
     "llmbridge @ git+ssh://git@github.com/williamvda/AIInterface.git@v0.1.0",
     "pandas",
     "python-dotenv",
