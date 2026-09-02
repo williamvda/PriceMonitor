@@ -430,3 +430,64 @@ def test_last_checked_keeps_other_items_when_one_row_is_unparseable(logger):
     checked = HistoryTab(FakeSheet(frame), "Prices", logger).last_checked()
     assert ("Widget", "shop.example") not in checked
     assert checked[("Gadget", "shop.example")] == datetime(2026, 8, 21, 6, 0, 0)
+
+
+def _priced(item: str, price: str, when: str, status: str = "ok") -> dict:
+    return {
+        "timestamp": when,
+        "item": item,
+        "website": "shop.example",
+        "price": price,
+        "currency": "GBP",
+        "source_url": "",
+        "note": "",
+        "status": status,
+    }
+
+
+def test_price_stats_reports_the_mean_last_price_and_count(logger):
+    frame = _history(
+        [
+            _priced("Widget", "100.0", "2026-08-20 06:00:00"),
+            _priced("Widget", "50.0", "2026-08-20 12:00:00"),
+            _priced("Widget", "60.0", "2026-08-20 18:00:00"),
+        ]
+    )
+    stats = HistoryTab(FakeSheet(frame), "Prices", logger).price_stats()
+    entry = stats[("Widget", "shop.example")]
+    assert entry.mean == 70.0
+    assert entry.last == 60.0
+    assert entry.count == 3
+
+
+def test_price_stats_ignores_rows_that_carry_no_price(logger):
+    frame = _history(
+        [
+            _priced("Widget", "100.0", "2026-08-20 06:00:00"),
+            _priced("Widget", "", "2026-08-20 12:00:00", status="not_found"),
+            _priced("Widget", "60.0", "2026-08-20 18:00:00"),
+        ]
+    )
+    entry = HistoryTab(FakeSheet(frame), "Prices", logger).price_stats()[
+        ("Widget", "shop.example")
+    ]
+    assert entry.mean == 80.0
+    assert entry.last == 60.0
+    assert entry.count == 2
+
+
+def test_price_stats_uses_timestamp_order_not_row_order(logger):
+    frame = _history(
+        [
+            _priced("Widget", "60.0", "2026-08-20 18:00:00"),
+            _priced("Widget", "100.0", "2026-08-20 06:00:00"),
+        ]
+    )
+    entry = HistoryTab(FakeSheet(frame), "Prices", logger).price_stats()[
+        ("Widget", "shop.example")
+    ]
+    assert entry.last == 60.0
+
+
+def test_price_stats_of_an_empty_history_is_empty(logger):
+    assert HistoryTab(FakeSheet(), "Prices", logger).price_stats() == {}

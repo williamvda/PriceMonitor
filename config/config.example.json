@@ -18,6 +18,7 @@
       "history_sheet": "Prices",
       "currency": "GBP",
       "suspect_threshold": 0.5,
+      "drop_step": 0.05,
       "max_plausible_price": 100000,
       "request_delay_s": 2
     },

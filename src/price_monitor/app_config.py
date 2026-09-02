@@ -49,6 +49,10 @@ class PriceCtrl:
     # always VAT-inclusive and comparable run to run. 0.2 = UK standard rate.
     vat_rate: float = 0.2
     suspect_threshold: float = 0.5
+    # Width of each price-drop alert band below the mean. A falling price is
+    # announced once per band it gives up, so a slow slide keeps reporting
+    # without a message on every refresh. 0.05 = one message per 5% lost.
+    drop_step: float = 0.05
     max_plausible_price: float = 100000.0
     request_delay_s: float = 2.0
 

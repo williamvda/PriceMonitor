@@ -4,10 +4,10 @@ Public surface: :class:`MsgServerHandler`, a logging handler that forwards each
 warning-or-above record to a MsgServer handle; :class:`MsgNotifier`, for
 deliberate status messages that are not log records; :func:`attach_msg_server`
 and :func:`detach_msg_server` for wiring and teardown; and the
-``format_*`` helpers that render the start, complete, and failure notices for
-one pricing check. The handler is purely additive — records still reach every
-other handler on the logger, so console output is unchanged whether or not the
-server is reachable.
+``format_*`` helpers that render the start, complete, failure, and
+price-drop notices for one pricing check. The handler is purely additive
+— records still reach every other handler on the logger, so console
+output is unchanged whether or not the server is reachable.
 """
 
 import logging
@@ -115,6 +115,28 @@ def format_check_complete(label: str, readings: list[PriceReading]) -> str:
     return (
         f"{icon} PriceMonitor {label} complete — "
         f"{priced}/{total} priced, {total - priced} failed"
+    )
+
+
+def format_price_drop(
+    reading: PriceReading, mean: float, still_falling: bool = False
+) -> str:
+    """Render the notice sent when an item drops further below its mean price.
+
+    ``still_falling`` marks a price that was already under the mean before this
+    reading, so an ongoing slide reads differently from a fresh crossing.
+
+    A SUSPECT reading is flagged rather than suppressed: a big crash is exactly
+    what is worth knowing about, but it is also the likeliest hallucination, so
+    the message says which it might be and leaves the call to the reader.
+    """
+    change = (reading.price - mean) / mean
+    trend = " still falling," if still_falling else ""
+    suffix = " (suspect)" if reading.status is PriceStatus.SUSPECT else ""
+    return (
+        f"📉 PriceMonitor — {reading.item} at {reading.website}: "
+        f"{reading.price:.2f} {reading.currency},{trend} "
+        f"below its {mean:.2f} {reading.currency} mean ({change:.0%}){suffix}"
     )
 
 

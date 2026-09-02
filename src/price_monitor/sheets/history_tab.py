@@ -11,7 +11,7 @@ from datetime import datetime
 import pandas as pd
 from py_utils.logger import get_child_logger
 
-from price_monitor.models import PriceReading
+from price_monitor.models import PriceReading, PriceStats
 from price_monitor.sheets.protocol import SheetInterface
 
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -93,6 +93,27 @@ class HistoryTab:
             ordered = group.sort_values("timestamp", kind="stable")
             prices[key] = float(ordered["price"].iloc[-1])
         return prices
+
+    def price_stats(self) -> dict[tuple[str, str], PriceStats]:
+        """Mean, most recent price, and reading count per (item, website) pair.
+
+        Only rows that carry a price count: a failed lookup must not drag the
+        mean or masquerade as the last price. Pairs with no priced row at all
+        are absent rather than present-and-empty.
+        """
+        frame = self._typed()
+        if frame.empty:
+            return {}
+        stats: dict[tuple[str, str], PriceStats] = {}
+        priced = frame[frame["price"].notna()]
+        for key, group in priced.groupby(["item", "website"], sort=False):
+            ordered = group.sort_values("timestamp", kind="stable")
+            stats[key] = PriceStats(
+                mean=float(ordered["price"].mean()),
+                last=float(ordered["price"].iloc[-1]),
+                count=len(ordered),
+            )
+        return stats
 
     def last_checked(self) -> dict[tuple[str, str], datetime]:
         """Most recent check time for each (item, website) pair, any status.

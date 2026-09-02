@@ -17,6 +17,7 @@ from price_monitor.msgserver_client.msg_forwarder import (
     format_check_complete,
     format_check_failed,
     format_check_started,
+    format_price_drop,
     format_startup_message,
 )
 
@@ -227,3 +228,26 @@ def test_detach_is_safe_without_a_client(logger):
 def test_handler_default_handle_matches_the_config_default():
     assert MsgServerHandler(FakeClient()).msg_handle == MsgConfig().handle
     assert msg_forwarder.MsgNotifier(FakeClient())._handle == MsgConfig().handle
+
+
+def test_price_drop_names_the_item_and_both_prices():
+    message = format_price_drop(_reading(PriceStatus.OK), mean=125.0)
+    assert message == (
+        "📉 PriceMonitor — Widget at shop.example: 100.00 GBP, "
+        "below its 125.00 GBP mean (-20%)"
+    )
+
+
+def test_a_suspect_drop_is_flagged_so_it_can_be_taken_with_a_pinch_of_salt():
+    message = format_price_drop(_reading(PriceStatus.SUSPECT), mean=125.0)
+    assert message.endswith("(-20%) (suspect)")
+
+
+def test_a_further_fall_is_marked_as_still_falling():
+    message = format_price_drop(
+        _reading(PriceStatus.OK), mean=125.0, still_falling=True
+    )
+    assert message == (
+        "📉 PriceMonitor — Widget at shop.example: 100.00 GBP, still falling, "
+        "below its 125.00 GBP mean (-20%)"
+    )

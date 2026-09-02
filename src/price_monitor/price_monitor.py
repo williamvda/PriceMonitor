@@ -20,7 +20,7 @@ from google_drive_api import GoogleSheetInterface
 from py_utils.logger import consoleLogger, get_child_logger
 
 from price_monitor.app_config import PriceCtrl, load_price_config
-from price_monitor.models import Item, PriceReading, PriceStatus
+from price_monitor.models import Item, PriceReading, PriceStats, PriceStatus
 from price_monitor.msgserver_client.msg_forwarder import (
     MsgNotifier,
     attach_msg_server,
@@ -28,6 +28,7 @@ from price_monitor.msgserver_client.msg_forwarder import (
     format_check_complete,
     format_check_failed,
     format_check_started,
+    format_price_drop,
     format_startup_message,
 )
 from price_monitor.search.searcher import PriceSearcher
@@ -160,6 +161,10 @@ class PriceMonitor:
         """
         self.notifier.notify(format_check_started(label, len(items)))
         try:
+            # Read before the append, so a new low price is compared against the
+            # mean of the readings that came before it rather than one it has
+            # already pulled down.
+            baseline = self.history.price_stats()
             readings = self._price_all(items)
             self.history.append(readings)
             self.items_tab.write_summary(
@@ -169,6 +174,28 @@ class PriceMonitor:
             self.notifier.notify(format_check_failed(label, exc))
             raise
         self.notifier.notify(format_check_complete(label, readings))
+        self._notify_price_drops(readings, baseline)
+
+    def _notify_price_drops(
+        self, readings: list[PriceReading], baseline: dict[tuple[str, str], PriceStats]
+    ) -> None:
+        """Announce each item that has just dropped into a deeper price band.
+
+        A price of ``None`` means the lookup produced no number, so there is
+        nothing to compare. Whether this reads as a fresh crossing or an ongoing
+        slide turns on where the *previous* reading sat, not how deep this one
+        landed — a single sharp fall is still a first drop.
+        """
+        for reading in readings:
+            stats = baseline.get((reading.item, reading.website))
+            if stats is None or reading.price is None:
+                continue
+            if stats.new_drop_band(reading.price, self.ctrl.drop_step):
+                self.notifier.notify(
+                    format_price_drop(
+                        reading, stats.mean, still_falling=stats.last < stats.mean
+                    )
+                )
 
     def _price_all(self, items: list[Item]) -> list[PriceReading]:
         last_prices = self.history.last_prices()

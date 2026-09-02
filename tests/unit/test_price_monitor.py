@@ -4,6 +4,7 @@ import logging
 import signal
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 from unittest import mock
 
@@ -558,3 +559,151 @@ def test_once_still_tears_down_the_msg_client(monkeypatch):
 
     monitor.update.assert_called_once_with(force=False)
     monitor.stop.assert_called_once()
+
+
+# --- price-drop notifications ----------------------------------------------
+
+
+class FixedPriceSearcher(FakeSearcher):
+    """Returns a chosen price so a crossing can be staged deterministically."""
+
+    def __init__(self, price: float) -> None:
+        super().__init__()
+        self._fixed = price
+
+    def price(
+        self, item: Item, last_price: float | None, timestamp: datetime
+    ) -> PriceReading:
+        return replace(super().price(item, last_price, timestamp), price=self._fixed)
+
+
+def _price_row(item: str, price: float, when: datetime) -> dict[str, str]:
+    row = _history_row(item, when)
+    row["price"] = f"{price:.2f}"
+    return row
+
+
+def _drops(notifier: RecordingNotifier) -> list[str]:
+    return [m for m in notifier.messages if m.startswith("📉")]
+
+
+def test_a_price_crossing_below_the_mean_is_announced(logger):
+    """The baseline is read before the append, so the new low price is compared
+    against the mean of what came before it, not one it has already pulled down."""
+    stale = datetime.now() - timedelta(hours=7)
+    rows = [
+        _price_row("Widget", 110.0, stale - timedelta(hours=2)),
+        _price_row("Widget", 120.0, stale - timedelta(hours=1)),
+        _price_row("Widget", 130.0, stale),
+    ]
+    monitor, notifier = _monitor_with_notifier(
+        _sheet_with_history(rows, ["Widget"]), FixedPriceSearcher(90.0), logger
+    )
+    monitor.update()
+
+    assert notifier.messages[-1] == (
+        "📉 PriceMonitor — Widget at shop.example: 90.00 GBP, "
+        "below its 120.00 GBP mean (-25%)"
+    )
+
+
+def test_a_price_that_stays_below_the_mean_is_not_re_announced(logger):
+    """Six hours later the price is still low; the drop was already reported."""
+    stale = datetime.now() - timedelta(hours=7)
+    rows = [
+        _price_row("Widget", 130.0, stale - timedelta(hours=2)),
+        _price_row("Widget", 120.0, stale - timedelta(hours=1)),
+        _price_row("Widget", 90.0, stale),
+    ]
+    monitor, notifier = _monitor_with_notifier(
+        _sheet_with_history(rows, ["Widget"]), FixedPriceSearcher(89.0), logger
+    )
+    monitor.update()
+
+    assert _drops(notifier) == []
+
+
+def test_an_item_with_too_little_history_announces_nothing(logger):
+    stale = datetime.now() - timedelta(hours=7)
+    rows = [
+        _price_row("Widget", 130.0, stale - timedelta(hours=1)),
+        _price_row("Widget", 110.0, stale),
+    ]
+    monitor, notifier = _monitor_with_notifier(
+        _sheet_with_history(rows, ["Widget"]), FixedPriceSearcher(90.0), logger
+    )
+    monitor.update()
+
+    assert _drops(notifier) == []
+
+
+def test_a_lookup_that_found_no_price_announces_nothing(logger):
+    """A reading with no price has nothing to compare against the mean."""
+
+    class BrokenSearcher(FakeSearcher):
+        def price(self, item, last_price, timestamp):
+            raise RuntimeError("site down")
+
+    stale = datetime.now() - timedelta(hours=7)
+    rows = [
+        _price_row("Widget", 130.0, stale - timedelta(hours=2)),
+        _price_row("Widget", 120.0, stale - timedelta(hours=1)),
+        _price_row("Widget", 110.0, stale),
+    ]
+    monitor, notifier = _monitor_with_notifier(
+        _sheet_with_history(rows, ["Widget"]), BrokenSearcher(), logger
+    )
+    monitor.update()
+
+    assert _drops(notifier) == []
+
+
+def test_a_slow_slide_past_the_next_step_is_announced_again(logger):
+    """The price already crossed below the mean; giving up another step must
+    still report, or a long steady decline goes silent after one message."""
+    stale = datetime.now() - timedelta(hours=7)
+    rows = [
+        _price_row("Widget", 100.0, stale - timedelta(hours=2)),
+        _price_row("Widget", 100.0, stale - timedelta(hours=1)),
+        _price_row("Widget", 95.0, stale),
+    ]
+    monitor, notifier = _monitor_with_notifier(
+        _sheet_with_history(rows, ["Widget"]), FixedPriceSearcher(88.0), logger
+    )
+    monitor.update()
+
+    assert notifier.messages[-1] == (
+        "📉 PriceMonitor — Widget at shop.example: 88.00 GBP, still falling, "
+        "below its 98.33 GBP mean (-11%)"
+    )
+
+
+def test_a_fall_that_stays_inside_its_step_is_not_announced_again(logger):
+    stale = datetime.now() - timedelta(hours=7)
+    rows = [
+        _price_row("Widget", 100.0, stale - timedelta(hours=2)),
+        _price_row("Widget", 100.0, stale - timedelta(hours=1)),
+        _price_row("Widget", 95.0, stale),
+    ]
+    monitor, notifier = _monitor_with_notifier(
+        _sheet_with_history(rows, ["Widget"]), FixedPriceSearcher(94.0), logger
+    )
+    monitor.update()
+
+    assert _drops(notifier) == []
+
+
+def test_a_sharp_first_crossing_is_not_worded_as_still_falling(logger):
+    """Landing several steps down in one go is still a first drop, not a slide."""
+    stale = datetime.now() - timedelta(hours=7)
+    rows = [
+        _price_row("Widget", 110.0, stale - timedelta(hours=2)),
+        _price_row("Widget", 120.0, stale - timedelta(hours=1)),
+        _price_row("Widget", 130.0, stale),
+    ]
+    monitor, notifier = _monitor_with_notifier(
+        _sheet_with_history(rows, ["Widget"]), FixedPriceSearcher(90.0), logger
+    )
+    monitor.update()
+
+    assert "still falling" not in notifier.messages[-1]
