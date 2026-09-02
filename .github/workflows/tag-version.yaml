@@ -1,0 +1,33 @@
+---
+# Backstop for the pre-push hook: fails loudly when a pushed tag disagrees
+# with the version in pyproject.toml. Copy into each project repo at
+# .github/workflows/tag-version.yaml (install.sh does this).
+name: Tag version gate
+
+"on":
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  version-matches-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Tag must match the version in pyproject.toml
+        run: |
+          declared=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          expected="${GITHUB_REF_NAME#v}"
+          if [ "$declared" != "$expected" ]; then
+            echo "::error::${GITHUB_REF_NAME} declares version ${declared} in pyproject.toml (expected ${expected})"
+            exit 1
+          fi
+          echo "${GITHUB_REF_NAME} matches pyproject version ${declared}"
