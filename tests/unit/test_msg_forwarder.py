@@ -68,7 +68,7 @@ def logger() -> logging.Logger:
 
 
 def test_startup_message_names_the_monitor():
-    assert format_startup_message() == "🟢 PriceMonitor started"
+    assert format_startup_message("0.1.7") == "🟢 PriceMonitor v0.1.7 started"
 
 
 def test_check_started_reports_the_label_and_count():

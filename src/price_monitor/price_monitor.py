@@ -19,6 +19,7 @@ from pathlib import Path
 from google_drive_api import GoogleSheetInterface
 from py_utils.logger import consoleLogger, get_child_logger
 
+from price_monitor import __version__
 from price_monitor.app_config import PriceCtrl, load_price_config
 from price_monitor.models import Item, PriceReading, PriceStats, PriceStatus
 from price_monitor.msgserver_client.msg_forwarder import (
@@ -263,7 +264,8 @@ class PriceMonitor:
     def start(self) -> None:
         self.thread.start()
         self.logger.info("Start thread")
-        self.notifier.notify(format_startup_message())
+        self.logger.info("PriceMonitor v%s started", __version__)
+        self.notifier.notify(format_startup_message(__version__))
 
     def stop(self) -> None:
         self.stop_event.set()

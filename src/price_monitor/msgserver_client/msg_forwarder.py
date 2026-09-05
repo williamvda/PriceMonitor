@@ -93,9 +93,14 @@ class MsgNotifier:
             self._logger.warning(f"⚠️ MsgServer notify failed: {exc}")
 
 
-def format_startup_message() -> str:
-    """Render the message sent when the monitor's poll loop starts."""
-    return "🟢 PriceMonitor started"
+def format_startup_message(version: str) -> str:
+    """Render the message sent when the monitor's poll loop starts.
+
+    ``version`` is the installed distribution's version, which the tag gate
+    ties to the deployed git tag -- so the message identifies the running
+    revision, not just that something started.
+    """
+    return f"🟢 PriceMonitor v{version} started"
 
 
 def format_check_started(label: str, item_count: int) -> str:

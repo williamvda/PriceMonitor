@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "price-monitor"
-version = "0.1.6"
+version = "0.1.7"
 requires-python = ">=3.11"
 dependencies = [
     # Private repos, so SSH rather than HTTPS: the installing host needs a key
@@ -24,7 +24,7 @@ price-monitor = "price_monitor.price_monitor:main"
 dev = ["pytest>=8.0", "black>=24.0", "isort>=5.13", "flake8>=7.0"]
 # msgserver is a direct git reference rather than a plain name: it is not
 # published on PyPI. Only needed when running with --msg-server.
-msgserver = ["msgserver @ git+ssh://git@github.com/williamvda/MsgServer.git@v0.1.6"]
+msgserver = ["msgserver @ git+ssh://git@github.com/williamvda/MsgServer.git@v0.1.7"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
