@@ -7,9 +7,9 @@ and :func:`detach_msg_server` for wiring and teardown; and the
 ``format_*`` helpers that render the start, complete, failure, and
 price-drop notices for one pricing check — :func:`format_market_drop` covers
 a drop in the UK-wide market sweep, :func:`format_price_drop` a supplier one.
-The handler is purely additive
-— records still reach every other handler on the logger, so console
-output is unchanged whether or not the server is reachable.
+The handler is purely additive — records still reach every other handler on
+the logger, so console output is unchanged whether or not the server is
+reachable.
 """
 
 import logging

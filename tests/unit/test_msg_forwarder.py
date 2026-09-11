@@ -274,7 +274,7 @@ def test_market_drop_names_the_supplier_the_rating_and_the_confidence():
     assert "14%" in message
 
 
-def test_market_drop_omits_the_rating_when_the_retailer_is_unrated():
+def test_market_drop_says_unrated_when_the_retailer_has_no_rating():
     reading = PriceReading(
         timestamp=datetime(2026, 9, 11, 6, 0, 0),
         item="Widget",

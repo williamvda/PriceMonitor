@@ -2,6 +2,9 @@
 
 Applies the plausibility ladder that keeps hallucinated or mis-matched prices
 out of the recorded history, or flags them where they are merely suspicious.
+Also exports :func:`normalise_price`, the currency/VAT/plausibility coercion
+shared with the market sweep so a market row and a supplier row stay
+comparable.
 """
 
 import math
