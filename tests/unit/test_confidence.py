@@ -44,9 +44,11 @@ def test_scores_match_the_specified_worked_examples(candidates, expected):
 
 
 def test_a_winner_well_under_the_others_median_is_punished():
-    # Winner 100 against others at 200/220/240 -> median 220, ratio 0.45.
+    # Winner 100 against others at 200/220/240 -> median 220, ratio 100/220 =
+    # 0.4545. The ratio is never rounded: the outlier factor is a continuous
+    # slide, and only the final product is rounded, once.
     others = [_candidate(p, url=f"https://o{p}.co.uk/w") for p in (200.0, 220.0, 240.0)]
-    assert score([_candidate(100.0)] + others, [CITED])[0] == 0.12
+    assert score([_candidate(100.0)] + others, [CITED])[0] == 0.14
 
 
 def test_a_modest_gap_under_the_median_is_only_partly_punished():

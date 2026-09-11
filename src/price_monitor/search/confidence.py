@@ -86,7 +86,7 @@ def _outlier(candidates: list[Candidate], winner: Candidate) -> tuple[float, str
         # source; punishing it here too would put it beyond any evidence.
         return 1.0, "sole source"
 
-    ratio = round(winner.price / median(others), 2)
+    ratio = winner.price / median(others)
     gap = f"winner {1 - ratio:.0%} under median"
     if ratio >= _OUTLIER_FULL:
         return 1.0, gap
