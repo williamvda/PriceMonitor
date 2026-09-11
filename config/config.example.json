@@ -19,7 +19,8 @@
       "currency": "GBP",
       "suspect_threshold": 0.5,
       "drop_step": 0.05,
-      "market_min_confidence": 0.5,
+      "min_confidence": 0.5,
+      "rating_premium_pct": 0.05,
       "max_plausible_price": 100000,
       "request_delay_s": 2
     },

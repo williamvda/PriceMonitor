@@ -209,7 +209,7 @@ class PriceMonitor:
                 continue
             if (
                 reading.confidence is not None
-                and reading.confidence < self.ctrl.market_min_confidence
+                and reading.confidence < self.ctrl.min_confidence
             ):
                 # Logged, not silent: an item that is gated every run is a
                 # prompt problem worth seeing, not a quiet nothing.
