@@ -5,7 +5,8 @@ exponential backoff; see :func:`retrying` for the retry mechanism and
 :func:`_is_retryable` for what counts as transient.
 
 Exports :func:`retrying` (the retry loop) and :const:`FORMAT_PROVIDER` (the
-un-grounded provider name) for reuse by other searchers.
+un-grounded provider name), both consumed by
+:class:`~price_monitor.search.market.MarketSearcher`.
 """
 
 import logging

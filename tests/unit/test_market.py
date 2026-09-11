@@ -433,8 +433,9 @@ def test_the_source_count_excludes_candidates_that_were_dropped(logger):
     assert reading.cheapest.price == 100.0
 
 
-def test_a_failed_sweep_records_no_source_count(logger):
-    """`error`/`parse_error` never got far enough to know; blank, not zero."""
+def test_a_not_found_sweep_records_no_source_count(logger):
+    """No usable candidates means `not_found`, which never got far enough to
+    know a source count; blank, not zero."""
     searcher = _searcher(logger, [])
     assert searcher.price_market(ITEM, None, NOW).sources is None
 

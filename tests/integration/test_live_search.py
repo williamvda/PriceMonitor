@@ -101,8 +101,10 @@ def test_live_sweep_returns_three_detections(config, logger):
         assert reading.best_value.price >= reading.cheapest.price or (
             reading.cheapest.rating == ""
         )
-    sources = int(reading.note.split()[0])
-    assert sources >= 2, f"sweep found only {sources} retailer(s): {reading.note}"
+    sources = reading.sources
+    assert (
+        sources is not None and sources >= 2
+    ), f"sweep found only {sources} retailer(s): {reading.note}"
 
 
 def _delete_tab(gsheet, sheet_name: str, logger: logging.Logger) -> None:

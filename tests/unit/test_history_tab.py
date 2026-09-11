@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 
 from price_monitor.models import Detection, PriceReading, PriceStatus
-from price_monitor.sheets.history_tab import COLUMNS, HistoryTab
+from price_monitor.sheets.history_tab import COLUMNS, SUMMARY_COLUMNS, HistoryTab
+from price_monitor.sheets.items_tab import COLUMNS as ITEMS_TAB_COLUMNS
 
 
 class FakeSheet:
@@ -280,6 +281,13 @@ def test_item_with_no_prices_summarises_blank(logger):
 
 def test_summarise_of_empty_history_is_empty(logger):
     assert HistoryTab(FakeSheet(), "Prices", logger).summarise().empty
+
+
+def test_summary_columns_match_the_items_tab():
+    """`summarise()`'s frame is consumed by `ItemsTab.write_summary()` via
+    `stats.get(field, "")` — a one-sided rename of either list would not
+    fail, it would just silently write blanks into the user's sheet."""
+    assert SUMMARY_COLUMNS == ITEMS_TAB_COLUMNS
 
 
 def test_columns_end_with_status_so_trailing_cells_are_never_trimmed():
