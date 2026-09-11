@@ -128,8 +128,9 @@ def test_a_badly_rated_retailer_is_no_longer_dropped(logger):
 
 def test_an_out_of_range_rating_is_treated_as_unrated(logger):
     """Ratings are out of 5. A model reporting 45.0 (out of 10, or a review
-    count mistaken for a score) must not sail past the floor and score a
-    full 1.0 on reputation — it is treated as unknown instead."""
+    count mistaken for a score) is not a trustworthy five-point value, so it
+    is treated as unknown rather than displayed — and stays ineligible for
+    the best-rated and best-value detections, which both require a rating."""
     searcher = _searcher(
         logger,
         [
@@ -144,8 +145,9 @@ def test_an_out_of_range_rating_is_treated_as_unrated(logger):
     assert reading.rating == ""
 
 
-def test_a_bad_rating_on_too_few_reviews_does_not_trigger_the_floor(logger):
-    """2.1 from 12 reviews is noise, not evidence — the candidate survives."""
+def test_a_bad_rating_on_too_few_reviews_reads_as_unrated(logger):
+    """2.1 from 12 reviews is noise, not evidence — the candidate survives
+    and competes on price, just without a displayed rating."""
     searcher = _searcher(
         logger,
         [
@@ -159,7 +161,7 @@ def test_a_bad_rating_on_too_few_reviews_does_not_trigger_the_floor(logger):
     assert reading.price == 50.0
 
 
-def test_an_unrated_retailer_survives_the_floor(logger):
+def test_an_unrated_retailer_still_competes(logger):
     """Dropping unknowns would bias every sweep toward the big chains."""
     searcher = _searcher(
         logger,
@@ -255,7 +257,7 @@ def test_a_non_dict_entry_in_candidates_is_ignored(logger):
 
 
 def test_a_boolean_rating_is_treated_as_unrated_not_as_one(logger):
-    """True as a rating must not parse as 1.0 and trip the floor."""
+    """True as a rating must not parse as 1.0 and be treated as trustworthy."""
     searcher = _searcher(
         logger,
         [_candidate(price=100.0, rating=True, rating_count=900)],
