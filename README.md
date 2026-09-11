@@ -117,7 +117,7 @@ You own columns A through C; everything after them is rewritten on every run.
 |----------------|--------|--------------------------------------------------------------------------|
 | `item`                  | you  | The product name, used for display and as part of its identity.        |
 | `website`               | you  | Either a bare domain (e.g. `shop.example`) to search, or a full product page URL to read directly. |
-| `market`                | you  | `yes` to also sweep UK retailers generally for this item on every run. Blank, or anything else, means no. Each sweep costs one extra billed search — see [The market sweep](#the-market-sweep). |
+| `market`                | you  | `yes` (also `y`, `true`, or `1`, case-insensitive) to also sweep UK retailers generally for this item on every run. Blank, or anything else, means no. Each sweep costs one extra billed search — see [The market sweep](#the-market-sweep). |
 | `current`               | tool | Most recent successfully-priced value.                                 |
 | `min`                   | tool | Lowest price seen.                                                     |
 | `mean`                  | tool | Mean of all successfully-priced values.                                |

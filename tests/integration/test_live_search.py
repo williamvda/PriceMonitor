@@ -186,8 +186,8 @@ def test_live_market_sweep_returns_a_scored_reading(config, logger):
     """One real UK-wide sweep. Asserts shape and plausibility, never a price.
 
     A mainstream, widely-stocked item is chosen deliberately: the assertion
-    that ``note`` names more than one source is the point of this test. If a
-    routine sweep of something this common turns up only one retailer, the
+    that the parsed source count is at least 2 is the point of this test. If
+    a routine sweep of something this common turns up only one retailer, the
     market prompt has drifted padding-averse, and that is worth catching here
     rather than discovering it later as a string of confidence-0.33 readings.
     """
@@ -207,10 +207,18 @@ def test_live_market_sweep_returns_a_scored_reading(config, logger):
         assert reading.confidence is not None
         assert 0.0 <= reading.confidence <= 1.0
         assert reading.source_url.startswith("http")
-        # The report should name more than one retailer for a mainstream
-        # item; if this is routinely 1, the prompt is padding-averse to a
-        # fault.
-        assert "source" in reading.note
+        # The reason string always starts "<n> source(s)"; n is the whole
+        # point of the sweep. A mainstream item that returns a single
+        # retailer means the prompt has drifted padding-averse, which
+        # silently guts the corroboration factor and caps every sweep at
+        # 0.33.
+        try:
+            sources = int(reading.note.split()[0])
+        except (IndexError, ValueError):
+            raise AssertionError(
+                f"could not parse source count from note: {reading.note!r}"
+            )
+        assert sources >= 2, f"sweep found only {sources} retailer(s): {reading.note}"
 
 
 def _delete_tab(gsheet, sheet_name: str, logger: logging.Logger) -> None:
