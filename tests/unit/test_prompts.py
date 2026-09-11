@@ -1,7 +1,12 @@
 """Prompt template tests."""
 
 from price_monitor.models import Item
-from price_monitor.search.prompts import format_prompt, search_prompt
+from price_monitor.search.prompts import (
+    format_prompt,
+    market_format_prompt,
+    market_prompt,
+    search_prompt,
+)
 
 
 def test_site_prompt_used_for_bare_domain():
@@ -76,3 +81,39 @@ def test_site_prompt_is_unchanged_by_the_page_fallback():
     prompt = search_prompt(Item(name="X", website="a.com"))
     assert "Search that site" in prompt
     assert "fell back to search" not in prompt
+
+
+def test_market_prompt_names_the_product_and_asks_for_a_set():
+    prompt = market_prompt(Item(name="Widget 3000", website="shop.example"))
+    assert "Widget 3000" in prompt
+    assert "three to six" in prompt
+
+
+def test_market_prompt_permits_a_single_retailer():
+    """Without this the model pads the list, which corrupts the agreement score."""
+    prompt = market_prompt(Item(name="Widget", website="shop.example"))
+    assert "only one retailer" in prompt
+
+
+def test_market_prompt_forbids_estimating_a_rating():
+    prompt = market_prompt(Item(name="Widget", website="shop.example"))
+    assert "Trustpilot" in prompt
+    assert "do not estimate one" in prompt
+
+
+def test_market_prompt_excludes_the_tracked_site_from_its_wording():
+    """The sweep is market-wide; the item's own website is not part of it."""
+    assert "shop.example" not in market_prompt(
+        Item(name="Widget", website="shop.example")
+    )
+
+
+def test_market_format_prompt_carries_the_report_and_urls():
+    prompt = market_format_prompt("Argos has it at 99.99", ["https://argos.co.uk/w"])
+    assert "Argos has it at 99.99" in prompt
+    assert "https://argos.co.uk/w" in prompt
+    assert "candidates" in prompt
+
+
+def test_market_format_prompt_renders_no_urls_as_none():
+    assert "none" in market_format_prompt("report", [])
