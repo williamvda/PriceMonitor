@@ -7,7 +7,7 @@ from datetime import datetime
 import pytest
 
 from price_monitor.app_config import MsgConfig
-from price_monitor.models import PriceReading, PriceStatus
+from price_monitor.models import MARKET_KEY, PriceReading, PriceStatus
 from price_monitor.msgserver_client import msg_forwarder
 from price_monitor.msgserver_client.msg_forwarder import (
     MsgNotifier,
@@ -17,6 +17,7 @@ from price_monitor.msgserver_client.msg_forwarder import (
     format_check_complete,
     format_check_failed,
     format_check_started,
+    format_market_drop,
     format_price_drop,
     format_startup_message,
 )
@@ -251,3 +252,39 @@ def test_a_further_fall_is_marked_as_still_falling():
         "📉 PriceMonitor — Widget at shop.example: 100.00 GBP, still falling, "
         "below its 125.00 GBP mean (-20%)"
     )
+
+
+def test_market_drop_names_the_supplier_the_rating_and_the_confidence():
+    reading = PriceReading(
+        timestamp=datetime(2026, 9, 11, 6, 0, 0),
+        item="Widget",
+        website=MARKET_KEY,
+        price=86.0,
+        currency="GBP",
+        status=PriceStatus.OK,
+        source_url="https://argos.co.uk/w",
+        confidence=0.82,
+        rating="4.1 Trustpilot",
+    )
+    message = format_market_drop(reading, mean=100.0)
+    assert "Widget" in message
+    assert "argos.co.uk" in message
+    assert "4.1 Trustpilot" in message
+    assert "0.82" in message
+    assert "14%" in message
+
+
+def test_market_drop_omits_the_rating_when_the_retailer_is_unrated():
+    reading = PriceReading(
+        timestamp=datetime(2026, 9, 11, 6, 0, 0),
+        item="Widget",
+        website=MARKET_KEY,
+        price=86.0,
+        currency="GBP",
+        status=PriceStatus.OK,
+        source_url="https://tinyshop.co.uk/w",
+        confidence=0.6,
+        rating="",
+    )
+    message = format_market_drop(reading, mean=100.0)
+    assert "unrated" in message

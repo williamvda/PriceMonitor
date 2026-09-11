@@ -29,6 +29,7 @@ from price_monitor.msgserver_client.msg_forwarder import (
     format_check_complete,
     format_check_failed,
     format_check_started,
+    format_market_drop,
     format_price_drop,
     format_startup_message,
 )
@@ -204,12 +205,27 @@ class PriceMonitor:
             stats = baseline.get((reading.item, reading.website))
             if stats is None or reading.price is None:
                 continue
-            if stats.new_drop_band(reading.price, self.ctrl.drop_step):
-                self.notifier.notify(
-                    format_price_drop(
-                        reading, stats.mean, still_falling=stats.last < stats.mean
-                    )
+            if not stats.new_drop_band(reading.price, self.ctrl.drop_step):
+                continue
+            if (
+                reading.confidence is not None
+                and reading.confidence < self.ctrl.market_min_confidence
+            ):
+                # Logged, not silent: an item that is gated every run is a
+                # prompt problem worth seeing, not a quiet nothing.
+                self.logger.info(
+                    f"Drop for '{reading.item}' suppressed: "
+                    f"confidence {reading.confidence:.2f}"
                 )
+                continue
+            formatter = (
+                format_market_drop
+                if reading.website == MARKET_KEY
+                else format_price_drop
+            )
+            self.notifier.notify(
+                formatter(reading, stats.mean, still_falling=stats.last < stats.mean)
+            )
 
     def _price_all(self, items: list[Item]) -> list[PriceReading]:
         last_prices = self.history.last_prices()

@@ -5,7 +5,9 @@ warning-or-above record to a MsgServer handle; :class:`MsgNotifier`, for
 deliberate status messages that are not log records; :func:`attach_msg_server`
 and :func:`detach_msg_server` for wiring and teardown; and the
 ``format_*`` helpers that render the start, complete, failure, and
-price-drop notices for one pricing check. The handler is purely additive
+price-drop notices for one pricing check — :func:`format_market_drop` covers
+a drop in the UK-wide market sweep, :func:`format_price_drop` a supplier one.
+The handler is purely additive
 — records still reach every other handler on the logger, so console
 output is unchanged whether or not the server is reachable.
 """
@@ -15,7 +17,7 @@ import threading
 from typing import Any
 
 from price_monitor.app_config import MsgConfig
-from price_monitor.models import PriceReading, PriceStatus
+from price_monitor.models import PriceReading, PriceStatus, supplier_domain
 
 _MISSING_PACKAGE_HINT = (
     "The msgserver client is not installed. "
@@ -141,6 +143,28 @@ def format_price_drop(
     return (
         f"📉 PriceMonitor — {reading.item} at {reading.website}: "
         f"{reading.price:.2f} {reading.currency},{trend} "
+        f"below its {mean:.2f} {reading.currency} mean ({change:.0%}){suffix}"
+    )
+
+
+def format_market_drop(
+    reading: PriceReading, mean: float, still_falling: bool = False
+) -> str:
+    """Render the notice sent when the best UK price drops below its mean.
+
+    Names the retailer and its rating because, unlike a supplier drop, the
+    reader has not chosen where this price comes from and needs both to judge
+    whether to act on it.
+    """
+    change = (reading.price - mean) / mean
+    trend = " still falling," if still_falling else ""
+    suffix = " (suspect)" if reading.status is PriceStatus.SUSPECT else ""
+    supplier = supplier_domain(reading.source_url) or "an unnamed retailer"
+    rating = reading.rating or "unrated"
+    return (
+        f"📉 PriceMonitor — best UK price for {reading.item}: "
+        f"{reading.price:.2f} {reading.currency} at {supplier} "
+        f"({rating}, confidence {reading.confidence:.2f}),{trend} "
         f"below its {mean:.2f} {reading.currency} mean ({change:.0%}){suffix}"
     )
 

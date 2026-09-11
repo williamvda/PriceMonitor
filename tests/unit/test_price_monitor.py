@@ -482,9 +482,12 @@ class RecordingNotifier:
 
 
 def _monitor_with_notifier(
-    sheet: FakeSheet, searcher: FakeSearcher, logger: logging.Logger
+    sheet: FakeSheet,
+    searcher: FakeSearcher,
+    logger: logging.Logger,
+    market_searcher: FakeMarketSearcher | None = None,
 ) -> tuple[PriceMonitor, RecordingNotifier]:
-    monitor = _monitor(sheet, searcher, logger)
+    monitor = _monitor(sheet, searcher, logger, market_searcher)
     notifier = RecordingNotifier()
     monitor.notifier = notifier
     return monitor, notifier
@@ -862,3 +865,88 @@ def test_a_failing_sweep_does_not_cost_the_supplier_price(logger, market_searche
     swept = prices[prices["website"] == MARKET_KEY]
     assert supplier.iloc[0]["status"] == PriceStatus.OK.value
     assert swept.iloc[0]["status"] == PriceStatus.ERROR.value
+
+
+# --- confidence gate ---------------------------------------------------------
+
+
+def _seed_market_history(item: str, prices: list[float]) -> list[dict[str, str]]:
+    """Three prior priced rows for ``(item, MARKET_KEY)`` — new_drop_band stays
+    silent below _MIN_READINGS, so a drop test needs a settled baseline."""
+    old = datetime.now() - timedelta(hours=7)
+    return [
+        _price_row(
+            item, price, old - timedelta(hours=len(prices) - i), website=MARKET_KEY
+        )
+        for i, price in enumerate(prices)
+    ]
+
+
+def _seed_supplier_history(item: str, prices: list[float]) -> list[dict[str, str]]:
+    """Three prior priced rows for ``(item, shop.example)``, same reasoning."""
+    old = datetime.now() - timedelta(hours=7)
+    return [
+        _price_row(item, price, old - timedelta(hours=len(prices) - i))
+        for i, price in enumerate(prices)
+    ]
+
+
+def test_a_low_confidence_drop_is_recorded_but_not_announced(logger, market_searcher):
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [{"item": "Widget", "website": "shop.example", "market": "yes"}]
+            ),
+            "Prices": pd.DataFrame(
+                _seed_market_history("Widget", [200.0, 200.0, 200.0])
+            ),
+        }
+    )
+    market_searcher.price = 100.0
+    market_searcher.confidence = 0.4
+    monitor, notifier = _monitor_with_notifier(
+        sheet, FakeSearcher(), logger, market_searcher
+    )
+    monitor.update(force=True)
+
+    prices = sheet.tabs["Prices"]
+    swept = prices[prices["website"] == MARKET_KEY]
+    assert any(float(p) == 100.0 for p in swept["price"])
+    assert _drops(notifier) == []
+
+
+def test_a_confident_drop_is_announced(logger, market_searcher):
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [{"item": "Widget", "website": "shop.example", "market": "yes"}]
+            ),
+            "Prices": pd.DataFrame(
+                _seed_market_history("Widget", [200.0, 200.0, 200.0])
+            ),
+        }
+    )
+    market_searcher.price = 100.0
+    market_searcher.confidence = 0.9
+    monitor, notifier = _monitor_with_notifier(
+        sheet, FakeSearcher(), logger, market_searcher
+    )
+    monitor.update(force=True)
+
+    assert any("📉" in m and "argos.co.uk" in m for m in _drops(notifier))
+
+
+def test_a_supplier_drop_is_unaffected_by_the_confidence_gate(logger):
+    """Supplier readings carry no confidence, so the gate must ignore them."""
+    sheet = FakeSheet(
+        {
+            "Items": _items([{"item": "Widget", "website": "shop.example"}]),
+            "Prices": pd.DataFrame(
+                _seed_supplier_history("Widget", [200.0, 200.0, 200.0])
+            ),
+        }
+    )
+    monitor, notifier = _monitor_with_notifier(sheet, FixedPriceSearcher(100.0), logger)
+    monitor.update(force=True)
+
+    assert _drops(notifier) != []

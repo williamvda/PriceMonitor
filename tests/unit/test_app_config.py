@@ -5,7 +5,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
-from price_monitor.app_config import MsgConfig, load_price_config
+from price_monitor.app_config import MsgConfig, PriceCtrl, load_price_config
 
 
 def _write_config(
@@ -110,3 +110,7 @@ def test_the_example_config_matches_the_schema(monkeypatch):
         (Path(__file__).parents[2] / "config" / "config.example.json").read_text()
     )
     assert example["config"]["msg_config"]["handle"] == MsgConfig().handle
+
+
+def test_market_min_confidence_defaults_to_a_half():
+    assert PriceCtrl().market_min_confidence == 0.5
