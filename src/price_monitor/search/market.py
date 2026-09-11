@@ -17,7 +17,7 @@ from py_utils.logger import get_child_logger
 
 from price_monitor.app_config import LLMConfig, PriceCtrl
 from price_monitor.models import MARKET_KEY, Item, PriceReading, PriceStatus
-from price_monitor.search.confidence import FLOOR_RATING, Candidate, score
+from price_monitor.search.confidence import Candidate, score
 from price_monitor.search.gemini_search import grounding_urls
 from price_monitor.search.json_extract import extract_json
 from price_monitor.search.prompts import market_format_prompt, market_prompt
@@ -156,13 +156,13 @@ class MarketSearcher:
             confidence=value,
             rating=winner.rating_label,
             # Survivors, not the number the model named: a retailer that is
-            # out of stock or below the floor cannot sell it, and this is the
-            # same count corroboration scored.
+            # out of stock or failed validation cannot sell it, and this is
+            # the same count corroboration scored.
             sources=len(candidates),
         )
 
     def _candidates(self, payload: dict) -> list[tuple[Candidate, str]]:
-        """Validated, in-stock, above-floor candidates, VAT-normalised.
+        """Validated, in-stock candidates, VAT-normalised.
 
         Each candidate is paired with the VAT-adjustment note
         :func:`normalise_price` returned for it (blank when its price needed
@@ -188,8 +188,7 @@ class MarketSearcher:
                 # Ratings are out of 5. A value outside that range (a rating
                 # out of 10, or a review count mistaken for a score) is not a
                 # trustworthy 5-point score, so it is treated as unknown
-                # rather than let it sail past the floor and inflate
-                # reputation to 1.0.
+                # rather than displayed as one.
                 rating = None
             count = _as_int(raw.get("rating_count"))
             candidate = Candidate(
@@ -201,16 +200,6 @@ class MarketSearcher:
                 rating_count=count,
                 rating_source=str(raw.get("rating_source") or "").strip(),
             )
-            # The floor needs both halves: a bad score on a handful of reviews
-            # is noise. An unrated retailer is never dropped here — plenty of
-            # legitimate specialists have no Trustpilot presence, and dropping
-            # them would bias every sweep toward the big chains.
-            if candidate.rated and candidate.rating < FLOOR_RATING:
-                self.logger.info(
-                    f"Dropping {candidate.supplier}: rated {candidate.rating} "
-                    f"on {candidate.rating_count} reviews"
-                )
-                continue
             candidates.append((candidate, vat_note))
         return candidates
 

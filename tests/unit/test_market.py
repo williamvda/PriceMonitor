@@ -107,18 +107,23 @@ def test_out_of_stock_candidates_are_not_eligible_to_win(logger):
     assert reading.price == 100.0
 
 
-def test_a_badly_rated_retailer_is_dropped_by_the_floor(logger):
+def test_a_badly_rated_retailer_is_no_longer_dropped(logger):
+    """The floor is gone: a 1.4-rated retailer competes on price like anyone.
+
+    Its rating travels to the sheet so the reader can judge it.
+    """
     searcher = _searcher(
         logger,
         [
             _candidate(
-                price=50.0, rating=2.1, rating_count=900, url="https://a.co.uk/w"
+                price=50.0, rating=1.4, rating_count=33904, url="https://a.co.uk/w"
             ),
             _candidate(price=100.0, url="https://b.co.uk/w"),
         ],
     )
     reading = searcher.price_market(ITEM, None, NOW)
-    assert reading.price == 100.0
+    assert reading.price == 50.0
+    assert reading.sources == 2
 
 
 def test_an_out_of_range_rating_is_treated_as_unrated(logger):
@@ -329,7 +334,7 @@ def test_a_single_retailer_sweep_records_one_source(logger):
 def test_the_source_count_excludes_candidates_that_were_dropped(logger):
     """Counts retailers that survived validation, not ones the model named.
 
-    Five reported but four unusable means one retailer can actually sell it,
+    Four reported but three unusable means one retailer can actually sell it,
     which is the fact worth surfacing — and the same count corroboration scored.
     """
     searcher = _searcher(
@@ -338,9 +343,6 @@ def test_the_source_count_excludes_candidates_that_were_dropped(logger):
             _candidate(price=100.0, url="https://keep.co.uk/w"),
             _candidate(price=10.0, in_stock=False, url="https://a.co.uk/w"),
             _candidate(price=20.0, currency="USD", url="https://b.co.uk/w"),
-            _candidate(
-                price=30.0, rating=2.1, rating_count=900, url="https://c.co.uk/w"
-            ),
             _candidate(price=-5.0, url="https://d.co.uk/w"),
         ],
     )

@@ -33,14 +33,39 @@ def _clustered(n: int, **winner_overrides) -> list[Candidate]:
     "candidates, expected",
     [
         (_clustered(4), 1.00),
-        (_clustered(4, rating=None, rating_count=None), 0.80),
-        (_clustered(4, rating=3.2, rating_count=900), 0.44),
-        (_clustered(2, rating=None, rating_count=None), 0.53),
+        (_clustered(4, rating=None, rating_count=None), 1.00),
+        (_clustered(4, rating=1.4, rating_count=33904), 1.00),
+        (_clustered(2), 0.67),
         (_clustered(1), 0.33),
     ],
 )
-def test_scores_match_the_specified_worked_examples(candidates, expected):
+def test_scores_depend_on_the_sweep_not_the_retailer(candidates, expected):
     assert score(candidates, [CITED])[0] == expected
+
+
+def test_a_poorly_rated_retailer_no_longer_lowers_confidence():
+    """Rating is shown against each detection; scoring it too would double-count.
+
+    Amazon UK sits at 1.4 on tens of thousands of Trustpilot reviews — a
+    retailer nobody would call untrustworthy. The rating cannot separate
+    'large retailer people complain about' from 'shop to avoid', so it is
+    displayed rather than scored.
+    """
+    good = score(_clustered(4, rating=4.8), [CITED])[0]
+    bad = score(_clustered(4, rating=1.4, rating_count=33904), [CITED])[0]
+    assert good == bad == 1.00
+
+
+def test_score_never_leaves_the_unit_interval():
+    for rating in (0.0, 1.0, 2.0, 3.0, 4.0, 5.0, None):
+        value = score(_clustered(4, rating=rating, rating_count=900), [CITED])[0]
+        assert 0.0 <= value <= 1.0
+
+
+def test_the_reason_no_longer_mentions_a_rating():
+    _, reason = score(_clustered(4), [CITED])
+    assert "rated" not in reason
+    assert "4 sources" in reason
 
 
 def test_a_winner_well_under_the_others_median_is_punished():
@@ -73,27 +98,10 @@ def test_a_winner_with_no_url_scores_lowest_on_sourcing():
     assert score(_clustered(4, url=""), [CITED])[0] == 0.3
 
 
-def test_the_reputation_shoulder_is_flat_at_and_above_four():
-    assert score(_clustered(4, rating=4.0), [CITED])[0] == 1.00
-    assert score(_clustered(4, rating=4.9), [CITED])[0] == 1.00
-
-
-def test_the_reputation_factor_bottoms_out_at_three():
-    assert score(_clustered(4, rating=3.0), [CITED])[0] == 0.30
-
-
-def test_a_rating_on_too_few_reviews_reads_as_unknown():
-    """4.9 from 12 reviews is noise, and must not score better than unrated."""
-    thin = score(_clustered(4, rating=4.9, rating_count=12), [CITED])[0]
-    unrated = score(_clustered(4, rating=None, rating_count=None), [CITED])[0]
-    assert thin == unrated == 0.80
-
-
 def test_the_reason_names_every_factor():
     _, reason = score(_clustered(4), [CITED])
     assert "4 sources" in reason
     assert "cited" in reason
-    assert "rated 4.4" in reason
 
 
 def test_an_empty_candidate_set_scores_zero():
