@@ -1,9 +1,11 @@
 """PriceMonitor controller and CLI entry point.
 
 Owns timing and orchestration: a slow full refresh of every tracked item
-(``refresh_rate_h``) and a faster poll that prices only items newly added to
-the sheet (``poll_rate_m``). All state lives in the spreadsheet, so a restart
-loses nothing. Neither JSON parsing nor sheet-range addressing belongs here —
+(``refresh_rate_h``) and a faster poll that sweeps only items newly added to
+the sheet (``poll_rate_m``). One UK-wide sweep per item, whose three detections
+are recorded and whose cheapest price drives the notifications. All state lives
+in the spreadsheet, so a restart loses nothing. Neither JSON parsing nor
+sheet-range addressing belongs here —
 those live in :mod:`price_monitor.app_config` and :mod:`price_monitor.sheets`.
 """
 
@@ -21,7 +23,7 @@ from py_utils.logger import consoleLogger, get_child_logger
 
 from price_monitor import __version__
 from price_monitor.app_config import PriceCtrl, load_price_config
-from price_monitor.models import MARKET_KEY, Item, PriceReading, PriceStats, PriceStatus
+from price_monitor.models import Item, PriceReading, PriceStats, PriceStatus
 from price_monitor.msgserver_client.msg_forwarder import (
     MsgNotifier,
     attach_msg_server,
@@ -29,12 +31,10 @@ from price_monitor.msgserver_client.msg_forwarder import (
     format_check_complete,
     format_check_failed,
     format_check_started,
-    format_market_drop,
     format_price_drop,
     format_startup_message,
 )
 from price_monitor.search.market import MarketSearcher
-from price_monitor.search.searcher import PriceSearcher
 from price_monitor.sheets.history_tab import HistoryTab
 from price_monitor.sheets.items_tab import ItemsTab
 from price_monitor.sheets.protocol import MonitoredSheetInterface
@@ -76,27 +76,21 @@ class PriceMonitor:
         )
         self._init_parts(
             gsheet=gsheet,
-            searcher=PriceSearcher(config.llm_config, config.price_ctrl, logger),
-            market_searcher=MarketSearcher(
-                config.llm_config, config.price_ctrl, logger
-            ),
+            searcher=MarketSearcher(config.llm_config, config.price_ctrl, logger),
         )
 
     @classmethod
     def for_test(
         cls,
         gsheet: MonitoredSheetInterface,
-        searcher: PriceSearcher,
+        searcher: MarketSearcher,
         logger: logging.Logger,
-        market_searcher: MarketSearcher | None = None,
     ) -> "PriceMonitor":
         """Build a controller around fakes, skipping config and network setup."""
         monitor = cls.__new__(cls)
         monitor.logger = get_child_logger(logger, cls.__name__)
         monitor.ctrl = PriceCtrl(request_delay_s=0.0)
-        monitor._init_parts(
-            gsheet=gsheet, searcher=searcher, market_searcher=market_searcher
-        )
+        monitor._init_parts(gsheet=gsheet, searcher=searcher)
         monitor.root_logger = logger
         monitor.msg_client = None
         monitor.notifier = MsgNotifier(client=None, logger=monitor.logger)
@@ -105,11 +99,9 @@ class PriceMonitor:
     def _init_parts(
         self,
         gsheet: MonitoredSheetInterface,
-        searcher: PriceSearcher,
-        market_searcher: MarketSearcher | None = None,
+        searcher: MarketSearcher,
     ) -> None:
         self._searcher = searcher
-        self._market_searcher = market_searcher
         self.items_tab = ItemsTab(gsheet, self.ctrl.items_sheet, self.logger)
         self.history = HistoryTab(gsheet, self.ctrl.history_sheet, self.logger)
         self._gsheet = gsheet
@@ -120,7 +112,7 @@ class PriceMonitor:
         """Price tracked items due for a refresh and rewrite the summary.
 
         An item checked less than ``refresh_rate_h`` ago is skipped: each
-        lookup costs a billed search, and repeated CLI runs would otherwise
+        sweep costs a billed search, and repeated CLI runs would otherwise
         re-price the same items for no new information. ``force`` re-prices
         everything regardless.
         """
@@ -148,8 +140,7 @@ class PriceMonitor:
         return [
             item
             for item in items
-            if (seen := last_checked.get((item.name, item.website))) is None
-            or seen <= cutoff
+            if (seen := last_checked.get(item.name)) is None or seen <= cutoff
         ]
 
     def poll(self) -> None:
@@ -158,7 +149,7 @@ class PriceMonitor:
             return
         items = self.items_tab.read()
         known = self.history.known_items()
-        new_items = [i for i in items if (i.name, i.website) not in known]
+        new_items = [i for i in items if i.name not in known]
         if not new_items:
             return
         self.logger.info(f"Found {len(new_items)} new items")
@@ -181,9 +172,7 @@ class PriceMonitor:
             readings = self._price_all(items)
             self.history.append(readings)
             self.items_tab.write_summary(
-                self.items_tab.read(),
-                self.history.summarise(),
-                self.history.market_summary(),
+                self.items_tab.read(), self.history.summarise()
             )
         except Exception as exc:
             self.notifier.notify(format_check_failed(label, exc))
@@ -192,20 +181,21 @@ class PriceMonitor:
         self._notify_price_drops(readings, baseline)
 
     def _notify_price_drops(
-        self, readings: list[PriceReading], baseline: dict[tuple[str, str], PriceStats]
+        self, readings: list[PriceReading], baseline: dict[str, PriceStats]
     ) -> None:
-        """Announce each item that has just dropped into a deeper price band.
+        """Announce each item whose cheapest price has just dropped a band.
 
-        A price of ``None`` means the lookup produced no number, so there is
-        nothing to compare. Whether this reads as a fresh crossing or an ongoing
-        slide turns on where the *previous* reading sat, not how deep this one
-        landed — a single sharp fall is still a first drop.
+        Only the cheapest series has a mean worth comparing against, so a sweep
+        with no cheapest detection produced nothing to compare. Whether this
+        reads as a fresh crossing or an ongoing slide turns on where the
+        *previous* reading sat, not how deep this one landed — a single sharp
+        fall is still a first drop.
         """
         for reading in readings:
-            stats = baseline.get((reading.item, reading.website))
-            if stats is None or reading.price is None:
+            stats = baseline.get(reading.item)
+            if stats is None or reading.cheapest is None:
                 continue
-            if not stats.new_drop_band(reading.price, self.ctrl.drop_step):
+            if not stats.new_drop_band(reading.cheapest.price, self.ctrl.drop_step):
                 continue
             if (
                 reading.confidence is not None
@@ -218,72 +208,31 @@ class PriceMonitor:
                     f"confidence {reading.confidence:.2f}"
                 )
                 continue
-            formatter = (
-                format_market_drop
-                if reading.website == MARKET_KEY
-                else format_price_drop
-            )
             self.notifier.notify(
-                formatter(reading, stats.mean, still_falling=stats.last < stats.mean)
+                format_price_drop(
+                    reading, stats.mean, still_falling=stats.last < stats.mean
+                )
             )
 
     def _price_all(self, items: list[Item]) -> list[PriceReading]:
         last_prices = self.history.last_prices()
         readings: list[PriceReading] = []
-        # A sweep is not tied to any supplier, so two rows for the same item
-        # name (tracked at two websites, both opted in) must sweep only once —
-        # otherwise the market series double-counts the reading and a single
-        # run can fire the same market-drop notification twice.
-        swept: set[str] = set()
-
         for index, item in enumerate(items):
             if index and self.ctrl.request_delay_s:
                 self.stop_event.wait(self.ctrl.request_delay_s)
-            readings.append(
-                self._price_one(item, last_prices.get((item.name, item.website)))
-            )
-            if (
-                item.market
-                and self._market_searcher is not None
-                and item.name not in swept
-            ):
-                swept.add(item.name)
-                if self.ctrl.request_delay_s:
-                    self.stop_event.wait(self.ctrl.request_delay_s)
-                readings.append(
-                    self._market_one(item, last_prices.get((item.name, MARKET_KEY)))
-                )
+            readings.append(self._sweep_one(item, last_prices.get(item.name)))
         return readings
 
-    def _price_one(self, item: Item, last_price: float | None) -> PriceReading:
+    def _sweep_one(self, item: Item, last_price: float | None) -> PriceReading:
         timestamp = datetime.now().replace(microsecond=0)
         try:
-            return self._searcher.price(item, last_price, timestamp)
+            return self._searcher.price_market(item, last_price, timestamp)
         except Exception as exc:
-            # One unreachable site must never abort the rest of the run.
-            self.logger.warning(f"Pricing '{item.name}' failed: {exc}")
+            # One failed sweep must never abort the rest of the run.
+            self.logger.warning(f"Sweep for '{item.name}' failed: {exc}")
             return PriceReading(
                 timestamp=timestamp,
                 item=item.name,
-                website=item.website,
-                price=None,
-                currency=self.ctrl.currency,
-                status=PriceStatus.ERROR,
-                note=str(exc),
-            )
-
-    def _market_one(self, item: Item, last_price: float | None) -> PriceReading:
-        timestamp = datetime.now().replace(microsecond=0)
-        try:
-            return self._market_searcher.price_market(item, last_price, timestamp)
-        except Exception as exc:
-            # A failed sweep must never cost the item its supplier price.
-            self.logger.warning(f"Market sweep for '{item.name}' failed: {exc}")
-            return PriceReading(
-                timestamp=timestamp,
-                item=item.name,
-                website=MARKET_KEY,
-                price=None,
                 currency=self.ctrl.currency,
                 status=PriceStatus.ERROR,
                 note=str(exc),

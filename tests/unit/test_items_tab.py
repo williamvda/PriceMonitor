@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from price_monitor.models import Item
-from price_monitor.sheets.items_tab import ItemsTab
+from price_monitor.sheets.items_tab import COLUMNS, ItemsTab
 
 
 class FakeSheet:
@@ -32,327 +32,161 @@ def logger():
 
 
 def _items_frame(rows: list[dict]) -> pd.DataFrame:
-    return pd.DataFrame(rows, columns=["item", "website"])
+    return pd.DataFrame(rows, columns=["item"])
+
+
+def _summary(**overrides) -> pd.DataFrame:
+    row = {
+        "item": "Widget",
+        "rated_price": 140.0,
+        "rated_site": "john-lewis.com",
+        "rated_rating": "4.6 Trustpilot",
+        "cheapest_price": 100.0,
+        "cheapest_site": "cheap.example",
+        "cheapest_rating": "",
+        "value_price": 110.0,
+        "value_site": "argos.co.uk",
+        "value_rating": "4.4 Trustpilot",
+        "min": 90.0,
+        "mean": 105.0,
+        "confidence": "0.90",
+        "sources": "4",
+        "last_checked": "2026-09-11 06:00:00",
+    }
+    row.update(overrides)
+    return pd.DataFrame([row])
 
 
 def test_reads_items_in_sheet_order(logger):
-    frame = _items_frame(
-        [
-            {"item": "Widget", "website": "shop.example"},
-            {"item": "Gadget", "website": "other.example"},
-        ]
-    )
+    frame = _items_frame([{"item": "Widget"}, {"item": "Gadget"}])
     items = ItemsTab(FakeSheet(frame), "Items", logger).read()
-    assert items == [
-        Item(name="Widget", website="shop.example"),
-        Item(name="Gadget", website="other.example"),
-    ]
+    assert items == [Item(name="Widget"), Item(name="Gadget")]
 
 
 def test_blank_name_row_is_skipped(logger):
-    frame = _items_frame(
-        [
-            {"item": "", "website": "shop.example"},
-            {"item": "Widget", "website": "shop.example"},
-        ]
-    )
-    assert ItemsTab(FakeSheet(frame), "Items", logger).read() == [
-        Item(name="Widget", website="shop.example")
-    ]
-
-
-def test_blank_website_row_is_skipped(logger):
-    frame = _items_frame([{"item": "Widget", "website": "  "}])
-    assert ItemsTab(FakeSheet(frame), "Items", logger).read() == []
+    frame = _items_frame([{"item": ""}, {"item": "Widget"}])
+    assert ItemsTab(FakeSheet(frame), "Items", logger).read() == [Item(name="Widget")]
 
 
 def test_surrounding_whitespace_is_trimmed(logger):
-    frame = _items_frame([{"item": "  Widget  ", "website": " shop.example "}])
-    assert ItemsTab(FakeSheet(frame), "Items", logger).read() == [
-        Item(name="Widget", website="shop.example")
-    ]
+    frame = _items_frame([{"item": "  Widget  "}])
+    assert ItemsTab(FakeSheet(frame), "Items", logger).read() == [Item(name="Widget")]
 
 
-def test_duplicate_pairs_are_deduplicated(logger, caplog):
-    frame = _items_frame(
-        [
-            {"item": "Widget", "website": "shop.example"},
-            {"item": "Widget", "website": "shop.example"},
-        ]
-    )
+def test_duplicate_names_are_deduplicated(logger, caplog):
+    """The key is the name alone now, so a repeated name is one item, not two
+    — otherwise the same sweep would be billed and recorded twice."""
+    frame = _items_frame([{"item": "Widget"}, {"item": "Widget"}])
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         items = ItemsTab(FakeSheet(frame), "Items", logger).read()
-    assert len(items) == 1
-    assert any(
-        "duplicate ('Widget', 'shop.example')" in record.message
-        for record in caplog.records
-    )
-
-
-def test_same_item_on_two_sites_is_kept(logger):
-    frame = _items_frame(
-        [
-            {"item": "Widget", "website": "shop.example"},
-            {"item": "Widget", "website": "other.example"},
-        ]
-    )
-    assert len(ItemsTab(FakeSheet(frame), "Items", logger).read()) == 2
+    assert items == [Item(name="Widget")]
+    assert any("duplicate 'Widget'" in record.message for record in caplog.records)
 
 
 def test_empty_tab_yields_no_items(logger):
     assert ItemsTab(FakeSheet(), "Items", logger).read() == []
 
 
-def test_tab_without_expected_headers_yields_no_items(logger):
+def test_tab_without_an_item_header_yields_no_items(logger):
     frame = pd.DataFrame([{"thing": "Widget"}])
     assert ItemsTab(FakeSheet(frame), "Items", logger).read() == []
 
 
-def test_write_summary_uses_write_so_deletions_do_not_linger(logger):
-    sheet = FakeSheet()
-    summary = pd.DataFrame(
+def test_none_item_is_skipped_with_warning(logger, caplog):
+    frame = _items_frame([{"item": None}, {"item": "Widget"}])
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        items = ItemsTab(FakeSheet(frame), "Items", logger).read()
+    assert items == [Item(name="Widget")]
+    assert any("blank item" in record.message for record in caplog.records)
+
+
+def test_nan_item_is_skipped_with_warning(logger, caplog):
+    frame = _items_frame([{"item": float("nan")}, {"item": "Widget"}])
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        items = ItemsTab(FakeSheet(frame), "Items", logger).read()
+    assert items == [Item(name="Widget")]
+    assert any("blank item" in record.message for record in caplog.records)
+
+
+def test_ragged_frame_from_api_does_not_create_nan_items(logger, caplog):
+    # Simulates what GoogleSheetInterface.read() does: builds a DataFrame from
+    # ragged rows where trailing cells are omitted, padding with NaN.
+    frame = pd.DataFrame([["Widget", "x"], [None, None]], columns=["item", "min"])
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        items = ItemsTab(FakeSheet(frame), "Items", logger).read()
+    assert items == [Item(name="Widget")]
+    assert any("blank item" in record.message for record in caplog.records)
+
+
+def test_a_stale_three_column_sheet_still_reads(logger):
+    """An existing sheet has item/website/market; only `item` matters now."""
+    frame = pd.DataFrame(
         [
-            {
-                "item": "Widget",
-                "website": "shop.example",
-                "current": 60.0,
-                "min": 50.0,
-                "mean": 70.0,
-                "last_checked": "2026-08-20 18:00:00",
-            }
+            {"item": "Widget", "website": "shop.example", "market": "yes"},
+            {"item": "Gadget", "website": "other.example", "market": ""},
         ]
     )
-    ItemsTab(sheet, "Items", logger).write_summary(
-        [Item(name="Widget", website="shop.example")], summary, pd.DataFrame()
-    )
+    items = ItemsTab(FakeSheet(frame), "Items", logger).read()
+    assert [i.name for i in items] == ["Widget", "Gadget"]
+
+
+def test_write_summary_uses_write_so_deletions_do_not_linger(logger):
+    sheet = FakeSheet()
+    ItemsTab(sheet, "Items", logger).write_summary([Item(name="Widget")], _summary())
     assert sheet.writes == ["write"]
+
+
+def test_write_summary_places_all_three_detections_on_the_item_row(logger):
+    sheet = FakeSheet()
+    ItemsTab(sheet, "Items", logger).write_summary([Item(name="Widget")], _summary())
+
     row = sheet.frame.iloc[0]
-    assert row["current"] == 60.0
-    assert row["mean"] == 70.0
+    assert list(sheet.frame.columns) == COLUMNS
+    assert row["rated_price"] == 140.0
+    assert row["rated_site"] == "john-lewis.com"
+    assert row["rated_rating"] == "4.6 Trustpilot"
+    assert row["cheapest_price"] == 100.0
+    assert row["value_site"] == "argos.co.uk"
+    assert row["min"] == 90.0
+    assert row["mean"] == 105.0
+    assert row["confidence"] == "0.90"
+    assert row["sources"] == "4"
+    assert row["last_checked"] == "2026-09-11 06:00:00"
 
 
-def test_item_without_history_gets_never_checked_sentinel(logger):
+def test_an_unswept_item_still_anchors_the_last_column(logger):
+    """Every other column is blank for an item never swept, so only
+    `last_checked` keeps the row from being trimmed away on the next read."""
     sheet = FakeSheet()
     ItemsTab(sheet, "Items", logger).write_summary(
-        [Item(name="New", website="shop.example")], pd.DataFrame(), pd.DataFrame()
+        [Item(name="Widget")], pd.DataFrame()
     )
+
     row = sheet.frame.iloc[0]
-    assert row["item"] == "New"
-    assert row["current"] == ""
+    assert list(sheet.frame.columns)[-1] == "last_checked"
+    for column in COLUMNS[1:-1]:
+        assert row[column] == "", column
     assert row["last_checked"] == "never"
 
 
-def test_item_with_history_gets_a_real_timestamp(logger):
+def test_an_item_missing_from_the_summary_is_still_written(logger):
+    """A new item added mid-run has no history row yet; it must still appear."""
     sheet = FakeSheet()
-    summary = pd.DataFrame(
-        [
-            {
-                "item": "Widget",
-                "website": "shop.example",
-                "current": 60.0,
-                "min": 50.0,
-                "mean": 70.0,
-                "last_checked": "2026-08-20 18:00:00",
-            }
-        ]
-    )
     ItemsTab(sheet, "Items", logger).write_summary(
-        [Item(name="Widget", website="shop.example")], summary, pd.DataFrame()
+        [Item(name="Widget"), Item(name="New")], _summary()
     )
-    row = sheet.frame.iloc[0]
-    assert row["last_checked"] == "2026-08-20 18:00:00"
+    assert list(sheet.frame["item"]) == ["Widget", "New"]
+    assert sheet.frame.iloc[1]["last_checked"] == "never"
+    assert sheet.frame.iloc[1]["cheapest_price"] == ""
 
 
 def test_summary_row_order_follows_the_items_list(logger):
     sheet = FakeSheet()
-    items = [
-        Item(name="B", website="shop.example"),
-        Item(name="A", website="shop.example"),
-    ]
     ItemsTab(sheet, "Items", logger).write_summary(
-        items, pd.DataFrame(), pd.DataFrame()
+        [Item(name="B"), Item(name="A")], pd.DataFrame()
     )
     assert list(sheet.frame["item"]) == ["B", "A"]
-
-
-def test_none_item_is_skipped_with_warning(logger, caplog):
-    frame = _items_frame(
-        [
-            {"item": None, "website": "shop.example"},
-            {"item": "Widget", "website": "shop.example"},
-        ]
-    )
-    caplog.clear()
-    with caplog.at_level(logging.WARNING):
-        items = ItemsTab(FakeSheet(frame), "Items", logger).read()
-    assert items == [Item(name="Widget", website="shop.example")]
-    assert any("blank item or website" in record.message for record in caplog.records)
-
-
-def test_none_website_is_skipped_with_warning(logger, caplog):
-    frame = _items_frame(
-        [
-            {"item": "Widget", "website": None},
-            {"item": "Gadget", "website": "shop.example"},
-        ]
-    )
-    caplog.clear()
-    with caplog.at_level(logging.WARNING):
-        items = ItemsTab(FakeSheet(frame), "Items", logger).read()
-    assert items == [Item(name="Gadget", website="shop.example")]
-    assert any("blank item or website" in record.message for record in caplog.records)
-
-
-def test_nan_item_is_skipped_with_warning(logger, caplog):
-    frame = _items_frame(
-        [
-            {"item": float("nan"), "website": "shop.example"},
-            {"item": "Widget", "website": "shop.example"},
-        ]
-    )
-    caplog.clear()
-    with caplog.at_level(logging.WARNING):
-        items = ItemsTab(FakeSheet(frame), "Items", logger).read()
-    assert items == [Item(name="Widget", website="shop.example")]
-    assert any("blank item or website" in record.message for record in caplog.records)
-
-
-@pytest.mark.parametrize("cell", ["yes", "Yes", "Y", "true", "TRUE", "1"])
-def test_truthy_market_cells_opt_the_item_in(logger, cell):
-    frame = pd.DataFrame(
-        [{"item": "Widget", "website": "shop.example", "market": cell}]
-    )
-    assert ItemsTab(FakeSheet(frame), "Items", logger).read()[0].market is True
-
-
-@pytest.mark.parametrize("cell", ["", "no", "n", "false", "0", "maybe"])
-def test_other_market_cells_leave_the_item_out(logger, cell):
-    frame = pd.DataFrame(
-        [{"item": "Widget", "website": "shop.example", "market": cell}]
-    )
-    assert ItemsTab(FakeSheet(frame), "Items", logger).read()[0].market is False
-
-
-def test_a_missing_market_column_reads_as_opted_out(logger):
-    """An existing sheet predates the column; it must migrate, not fail."""
-    frame = _items_frame([{"item": "Widget", "website": "shop.example"}])
-    items = ItemsTab(FakeSheet(frame), "Items", logger).read()
-    assert len(items) == 1
-    assert items[0].market is False
-
-
-@pytest.mark.parametrize("sentinel", ["market", "Market", "MARKET", "  Market  "])
-def test_the_market_sentinel_is_rejected_as_a_website(logger, sentinel):
-    """Otherwise a typo silently merges an item into the market series."""
-    frame = pd.DataFrame(
-        [
-            {"item": "Widget", "website": sentinel, "market": ""},
-            {"item": "Gadget", "website": "shop.example", "market": ""},
-        ]
-    )
-    items = ItemsTab(FakeSheet(frame), "Items", logger).read()
-    assert [i.name for i in items] == ["Gadget"]
-
-
-def test_write_summary_places_market_columns_on_the_item_row(logger):
-    sheet = FakeSheet()
-    items = [Item(name="Widget", website="shop.example", market=True)]
-    summary = pd.DataFrame(
-        [
-            {
-                "item": "Widget",
-                "website": "shop.example",
-                "current": 200.0,
-                "min": 190.0,
-                "mean": 195.0,
-                "last_checked": "2026-09-11 06:00:00",
-            }
-        ]
-    )
-    market = pd.DataFrame(
-        [
-            {
-                "item": "Widget",
-                "best_price": 100.0,
-                "best_supplier": "argos.co.uk",
-                "best_supplier_rating": "4.4 Trustpilot",
-                "confidence": "0.9",
-                "market_checked": "2026-09-11 06:00:00",
-            }
-        ]
-    )
-    ItemsTab(sheet, "Items", logger).write_summary(items, summary, market)
-
-    row = sheet.frame.iloc[0]
-    assert list(sheet.frame.columns)[-1] == "market_checked"
-    assert row["market"] == "yes"
-    assert row["current"] == 200.0
-    assert row["best_price"] == 100.0
-    assert row["best_supplier"] == "argos.co.uk"
-    assert row["confidence"] == "0.9"
-
-
-def test_an_unswept_item_still_anchors_the_last_column(logger):
-    """Blank trailing cells make a sheet unreadable; 'never' prevents that."""
-    sheet = FakeSheet()
-    items = [Item(name="Widget", website="shop.example")]
-    ItemsTab(sheet, "Items", logger).write_summary(
-        items, pd.DataFrame(), pd.DataFrame()
-    )
-
-    row = sheet.frame.iloc[0]
-    assert row["market"] == ""
-    assert row["best_price"] == ""
-    assert row["market_checked"] == "never"
-    assert row["last_checked"] == "never"
-
-
-def test_ragged_frame_from_api_does_not_create_nan_items(logger, caplog):
-    # Simulates what GoogleSheetInterface.read() does: builds DataFrame from
-    # ragged rows where trailing cells are omitted, padding with NaN.
-    frame = pd.DataFrame(
-        [["Widget", "shop.example"], ["Gadget"]], columns=["item", "website"]
-    )
-    caplog.clear()
-    with caplog.at_level(logging.WARNING):
-        items = ItemsTab(FakeSheet(frame), "Items", logger).read()
-    # Only the complete row should be kept; the ragged row skipped
-    assert items == [Item(name="Widget", website="shop.example")]
-    assert any("blank item or website" in record.message for record in caplog.records)
-
-
-def test_write_summary_shows_the_source_count(logger):
-    sheet = FakeSheet()
-    market = pd.DataFrame(
-        [
-            {
-                "item": "Widget",
-                "best_price": 100.0,
-                "best_supplier": "argos.co.uk",
-                "best_supplier_rating": "4.4 Trustpilot",
-                "confidence": "0.33",
-                "sources": "1",
-                "market_checked": "2026-09-11 06:00:00",
-            }
-        ]
-    )
-    ItemsTab(sheet, "Items", logger).write_summary(
-        [Item(name="Widget", website="shop.example", market=True)],
-        pd.DataFrame(),
-        market,
-    )
-    row = sheet.frame.iloc[0]
-    assert row["sources"] == "1"
-    assert list(sheet.frame.columns)[-1] == "market_checked"
-
-
-def test_an_unswept_item_leaves_the_source_count_blank(logger):
-    """market_checked must still anchor the row when sources is blank too."""
-    sheet = FakeSheet()
-    ItemsTab(sheet, "Items", logger).write_summary(
-        [Item(name="Widget", website="shop.example")], pd.DataFrame(), pd.DataFrame()
-    )
-    row = sheet.frame.iloc[0]
-    assert row["sources"] == ""
-    assert row["market_checked"] == "never"

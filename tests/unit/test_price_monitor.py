@@ -4,7 +4,6 @@ import logging
 import signal
 import threading
 import time
-from dataclasses import replace
 from datetime import datetime, timedelta
 from unittest import mock
 
@@ -13,8 +12,9 @@ import pytest
 
 import price_monitor.price_monitor as price_monitor_module
 from price_monitor.app_config import PriceCtrl
-from price_monitor.models import MARKET_KEY, Item, PriceReading, PriceStatus
+from price_monitor.models import Detection, Item, PriceReading, PriceStatus
 from price_monitor.price_monitor import PriceMonitor, args_parser
+from price_monitor.sheets.history_tab import COLUMNS as HISTORY_COLUMNS
 
 
 class FakeSheet:
@@ -35,57 +35,35 @@ class FakeSheet:
         return self.modified
 
 
-class FakeSearcher:
-    def __init__(self) -> None:
-        self.priced: list[str] = []
-
-    def price(
-        self, item: Item, last_price: float | None, timestamp: datetime
-    ) -> PriceReading:
-        self.priced.append(item.name)
-        return PriceReading(
-            timestamp=timestamp,
-            item=item.name,
-            website=item.website,
-            price=100.0,
-            currency="GBP",
-            status=PriceStatus.OK,
-            source_url="https://shop.example/w",
-        )
-
-
 class FakeMarketSearcher:
-    """Returns a canned market reading, or raises if told to."""
+    """Returns a canned sweep, or raises if told to."""
 
     def __init__(self, price: float = 100.0, confidence: float = 0.9) -> None:
         self.price = price
         self.confidence = confidence
-        self.calls: list[str] = []
-        self.readings: list[PriceReading] = []
+        self.swept: list[str] = []
         self.raises: Exception | None = None
         self.seen_last_price: float | None = None
 
     def price_market(
         self, item: Item, last_price: float | None, timestamp: datetime
     ) -> PriceReading:
-        self.calls.append(item.name)
+        self.swept.append(item.name)
         self.seen_last_price = last_price
         if self.raises is not None:
             raise self.raises
-        reading = PriceReading(
+        return PriceReading(
             timestamp=timestamp,
             item=item.name,
-            website=MARKET_KEY,
-            price=self.price,
             currency="GBP",
             status=PriceStatus.OK,
-            source_url="https://argos.co.uk/w",
-            note="3 sources, cited, rated 4.4",
+            best_rated=Detection(self.price + 40.0, "john-lewis.com", "4.6 Trustpilot"),
+            cheapest=Detection(self.price, "argos.co.uk", "4.4 Trustpilot"),
+            best_value=Detection(self.price + 5.0, "very.co.uk", "4.5 Trustpilot"),
+            note="3 sources, cited",
             confidence=self.confidence,
-            rating="4.4 Trustpilot",
+            sources=3,
         )
-        self.readings.append(reading)
-        return reading
 
 
 @pytest.fixture
@@ -94,181 +72,133 @@ def logger() -> logging.Logger:
 
 
 @pytest.fixture
-def market_searcher() -> FakeMarketSearcher:
+def searcher() -> FakeMarketSearcher:
     return FakeMarketSearcher()
 
 
 def _monitor(
-    sheet: FakeSheet,
-    searcher: FakeSearcher,
-    logger: logging.Logger,
-    market_searcher: FakeMarketSearcher | None = None,
+    sheet: FakeSheet, searcher: FakeMarketSearcher, logger: logging.Logger
 ) -> PriceMonitor:
-    return PriceMonitor.for_test(
-        gsheet=sheet, searcher=searcher, logger=logger, market_searcher=market_searcher
-    )
+    return PriceMonitor.for_test(gsheet=sheet, searcher=searcher, logger=logger)
 
 
-def _items(rows: list[dict[str, str]]) -> pd.DataFrame:
-    return pd.DataFrame(rows, columns=["item", "website"])
+def _items(names: list[str]) -> pd.DataFrame:
+    return pd.DataFrame([{"item": n} for n in names], columns=["item"])
 
 
-def _items_with_market(rows: list[dict[str, str]]) -> pd.DataFrame:
-    return pd.DataFrame(rows, columns=["item", "website", "market"])
+def _history_row(
+    item: str, when: datetime, price: float | None = 100.0, status: str = "ok"
+) -> dict[str, str]:
+    cell = "" if price is None else f"{price:.2f}"
+    return {
+        "timestamp": when.strftime("%Y-%m-%d %H:%M:%S"),
+        "item": item,
+        "rated_price": cell,
+        "rated_site": "argos.co.uk",
+        "rated_rating": "4.4 Trustpilot",
+        "cheapest_price": cell,
+        "cheapest_site": "argos.co.uk",
+        "cheapest_rating": "4.4 Trustpilot",
+        "value_price": cell,
+        "value_site": "argos.co.uk",
+        "value_rating": "4.4 Trustpilot",
+        "confidence": "0.90",
+        "sources": "3",
+        "note": "",
+        "status": status,
+    }
 
 
-def test_update_prices_every_item(logger):
-    sheet = FakeSheet(
+def _sheet_with_history(rows: list[dict[str, str]], items: list[str]) -> FakeSheet:
+    return FakeSheet(
         {
-            "Items": _items(
-                [
-                    {"item": "Widget", "website": "shop.example"},
-                    {"item": "Gadget", "website": "shop.example"},
-                ]
-            )
+            "Items": _items(items),
+            "Prices": pd.DataFrame(rows, columns=HISTORY_COLUMNS),
         }
     )
-    searcher = FakeSearcher()
+
+
+def test_update_sweeps_every_item_once(logger, searcher):
+    """One sweep per item is structural now: there is no second lookup to
+    de-duplicate against."""
+    sheet = FakeSheet({"Items": _items(["Widget", "Gadget"])})
     _monitor(sheet, searcher, logger).update()
-    assert searcher.priced == ["Widget", "Gadget"]
+    assert searcher.swept == ["Widget", "Gadget"]
     assert len(sheet.tabs["Prices"]) == 2
 
 
-def test_update_writes_the_summary_back(logger):
-    sheet = FakeSheet(
-        {"Items": _items([{"item": "Widget", "website": "shop.example"}])}
-    )
-    _monitor(sheet, FakeSearcher(), logger).update()
-    assert sheet.tabs["Items"].iloc[0]["current"] == 100.0
+def test_a_repeated_item_name_is_swept_only_once(logger, searcher):
+    """The key is the name alone, so a duplicated row must not bill a second
+    sweep or double-count the item in its own history."""
+    sheet = FakeSheet({"Items": _items(["Widget", "Widget"])})
+    _monitor(sheet, searcher, logger).update()
+    assert searcher.swept == ["Widget"]
+    assert len(sheet.tabs["Prices"]) == 1
 
 
-def test_poll_does_nothing_when_the_sheet_is_unchanged(logger):
-    sheet = FakeSheet(
-        {"Items": _items([{"item": "Widget", "website": "shop.example"}])}
-    )
-    searcher = FakeSearcher()
+def test_update_writes_the_summary_back(logger, searcher):
+    sheet = FakeSheet({"Items": _items(["Widget"])})
+    _monitor(sheet, searcher, logger).update()
+    row = sheet.tabs["Items"].iloc[0]
+    assert row["cheapest_price"] == 100.0
+    assert row["cheapest_site"] == "argos.co.uk"
+    assert row["rated_site"] == "john-lewis.com"
+    assert row["value_site"] == "very.co.uk"
+    assert row["sources"] == "3"
+
+
+def test_poll_does_nothing_when_the_sheet_is_unchanged(logger, searcher):
+    sheet = FakeSheet({"Items": _items(["Widget"])})
     monitor = _monitor(sheet, searcher, logger)
     sheet.modified = False
     monitor.poll()
-    assert searcher.priced == []
+    assert searcher.swept == []
 
 
-def test_poll_prices_only_the_new_item(logger):
-    sheet = FakeSheet(
-        {
-            "Items": _items(
-                [
-                    {"item": "Widget", "website": "shop.example"},
-                    {"item": "Gadget", "website": "shop.example"},
-                ]
-            ),
-            "Prices": pd.DataFrame(
-                [
-                    {
-                        "timestamp": "2026-08-20 06:00:00",
-                        "item": "Widget",
-                        "website": "shop.example",
-                        "price": "100.00",
-                        "currency": "GBP",
-                        "status": "ok",
-                        "source_url": "",
-                        "note": "",
-                    }
-                ],
-                columns=[
-                    "timestamp",
-                    "item",
-                    "website",
-                    "price",
-                    "currency",
-                    "status",
-                    "source_url",
-                    "note",
-                ],
-            ),
-        }
-    )
-    searcher = FakeSearcher()
+def test_poll_sweeps_only_the_new_item(logger, searcher):
+    old = datetime.now() - timedelta(hours=1)
+    sheet = _sheet_with_history([_history_row("Widget", old)], ["Widget", "Gadget"])
     monitor = _monitor(sheet, searcher, logger)
     sheet.modified = True
     monitor.poll()
-    assert searcher.priced == ["Gadget"]
+    assert searcher.swept == ["Gadget"]
 
 
-def test_a_failing_item_does_not_stop_the_others(logger):
-    class Exploding(FakeSearcher):
-        def price(
-            self, item: Item, last_price: float | None, timestamp: datetime
-        ) -> PriceReading:
+def test_a_failing_sweep_does_not_stop_the_others(logger):
+    class Exploding(FakeMarketSearcher):
+        def price_market(self, item, last_price, timestamp):
             if item.name == "Widget":
                 raise RuntimeError("boom")
-            return super().price(item, last_price, timestamp)
+            return super().price_market(item, last_price, timestamp)
 
-    sheet = FakeSheet(
-        {
-            "Items": _items(
-                [
-                    {"item": "Widget", "website": "shop.example"},
-                    {"item": "Gadget", "website": "shop.example"},
-                ]
-            )
-        }
-    )
-    searcher = Exploding()
-    _monitor(sheet, searcher, logger).update()
+    sheet = FakeSheet({"Items": _items(["Widget", "Gadget"])})
+    _monitor(sheet, Exploding(), logger).update()
     statuses = list(sheet.tabs["Prices"]["status"])
     assert "error" in statuses
     assert "ok" in statuses
 
 
-def test_last_price_is_passed_to_the_searcher(logger):
-    seen = {}
-
-    class Recording(FakeSearcher):
-        def price(
-            self, item: Item, last_price: float | None, timestamp: datetime
-        ) -> PriceReading:
-            seen[item.name] = last_price
-            return super().price(item, last_price, timestamp)
-
-    sheet = FakeSheet(
-        {
-            "Items": _items([{"item": "Widget", "website": "shop.example"}]),
-            "Prices": pd.DataFrame(
-                [
-                    {
-                        "timestamp": "2026-08-20 06:00:00",
-                        "item": "Widget",
-                        "website": "shop.example",
-                        "price": "80.00",
-                        "currency": "GBP",
-                        "status": "ok",
-                        "source_url": "",
-                        "note": "",
-                    }
-                ],
-                columns=[
-                    "timestamp",
-                    "item",
-                    "website",
-                    "price",
-                    "currency",
-                    "status",
-                    "source_url",
-                    "note",
-                ],
-            ),
-        }
-    )
-    _monitor(sheet, Recording(), logger).update()
-    assert seen["Widget"] == 80.0
+def test_a_failing_sweep_records_no_detections(logger, searcher):
+    searcher.raises = RuntimeError("sweep exploded")
+    sheet = FakeSheet({"Items": _items(["Widget"])})
+    _monitor(sheet, searcher, logger).update()
+    row = sheet.tabs["Prices"].iloc[0]
+    assert row["status"] == PriceStatus.ERROR.value
+    assert row["cheapest_price"] == ""
+    assert row["rated_price"] == ""
+    assert row["value_price"] == ""
 
 
-def test_run_survives_a_failing_update_and_stop_is_prompt(logger):
-    sheet = FakeSheet(
-        {"Items": _items([{"item": "Widget", "website": "shop.example"}])}
-    )
-    monitor = _monitor(sheet, FakeSearcher(), logger)
+def test_the_last_cheapest_price_is_passed_to_the_searcher(logger, searcher):
+    old = datetime.now() - timedelta(hours=7)
+    sheet = _sheet_with_history([_history_row("Widget", old, price=80.0)], ["Widget"])
+    _monitor(sheet, searcher, logger).update()
+    assert searcher.seen_last_price == 80.0
+
+
+def test_run_survives_a_failing_update_and_stop_is_prompt(logger, searcher):
+    sheet = FakeSheet({"Items": _items(["Widget"])})
+    monitor = _monitor(sheet, searcher, logger)
     # Short intervals so a surviving loop calls update() again almost at
     # once. A *second* call is the real proof _safe_run's except clause
     # caught the first exception — a single call is consistent with either
@@ -324,117 +254,80 @@ def test_parser_accepts_once_flag():
     assert str(args.secrets) == "/tmp/s"
 
 
-def _history_row(
-    item: str, when: datetime, status: str = "ok", website: str = "shop.example"
-) -> dict[str, str]:
-    return {
-        "timestamp": when.strftime("%Y-%m-%d %H:%M:%S"),
-        "item": item,
-        "website": website,
-        "price": "100.00",
-        "currency": "GBP",
-        "source_url": "",
-        "note": "",
-        "status": status,
-    }
-
-
-def _sheet_with_history(
-    rows: list[dict[str, str]], items: list[str], market: bool = False
-) -> FakeSheet:
-    items_frame = (
-        _items_with_market(
-            [{"item": n, "website": "shop.example", "market": "yes"} for n in items]
-        )
-        if market
-        else _items([{"item": n, "website": "shop.example"} for n in items])
-    )
-    return FakeSheet({"Items": items_frame, "Prices": pd.DataFrame(rows)})
-
-
-def test_update_skips_an_item_checked_within_the_refresh_window(logger):
-    """Each lookup costs a billed search, so a recent check holds off the next."""
+def test_update_skips_an_item_checked_within_the_refresh_window(logger, searcher):
+    """Each sweep costs a billed search, so a recent check holds off the next."""
     recent = datetime.now() - timedelta(hours=1)
     sheet = _sheet_with_history([_history_row("Widget", recent)], ["Widget"])
-    searcher = FakeSearcher()
     _monitor(sheet, searcher, logger).update()
-    assert searcher.priced == []
+    assert searcher.swept == []
 
 
-def test_update_prices_an_item_checked_before_the_refresh_window(logger):
+def test_update_sweeps_an_item_checked_before_the_refresh_window(logger, searcher):
     stale = datetime.now() - timedelta(hours=7)
     sheet = _sheet_with_history([_history_row("Widget", stale)], ["Widget"])
-    searcher = FakeSearcher()
     _monitor(sheet, searcher, logger).update()
-    assert searcher.priced == ["Widget"]
+    assert searcher.swept == ["Widget"]
 
 
-def test_update_prices_an_item_with_no_history_at_all(logger):
+def test_update_sweeps_an_item_with_no_history_at_all(logger, searcher):
     recent = datetime.now() - timedelta(hours=1)
     sheet = _sheet_with_history([_history_row("Widget", recent)], ["Widget", "Gadget"])
-    searcher = FakeSearcher()
     _monitor(sheet, searcher, logger).update()
-    assert searcher.priced == ["Gadget"]
+    assert searcher.swept == ["Gadget"]
 
 
-def test_force_re_prices_everything_regardless_of_recency(logger):
+def test_force_re_sweeps_everything_regardless_of_recency(logger, searcher):
     recent = datetime.now() - timedelta(hours=1)
     sheet = _sheet_with_history([_history_row("Widget", recent)], ["Widget"])
-    searcher = FakeSearcher()
     _monitor(sheet, searcher, logger).update(force=True)
-    assert searcher.priced == ["Widget"]
+    assert searcher.swept == ["Widget"]
 
 
-def test_a_failed_check_still_holds_off_the_next_one(logger):
-    """A not_found lookup spent an API call just as an ok one did, so it must
+def test_a_failed_check_still_holds_off_the_next_one(logger, searcher):
+    """A not_found sweep spent an API call just as an ok one did, so it must
     count as a check — otherwise a failing item is retried on every run."""
     recent = datetime.now() - timedelta(hours=1)
-    row = _history_row("Widget", recent, status="not_found")
-    row["price"] = ""
+    row = _history_row("Widget", recent, price=None, status="not_found")
     sheet = _sheet_with_history([row], ["Widget"])
-    searcher = FakeSearcher()
     _monitor(sheet, searcher, logger).update()
-    assert searcher.priced == []
+    assert searcher.swept == []
 
 
-def test_recency_uses_the_newest_row_not_the_last_one(logger):
+def test_recency_uses_the_newest_row_not_the_last_one(logger, searcher):
     """Rows can land out of order; the most recent check is what matters."""
     rows = [
         _history_row("Widget", datetime.now() - timedelta(hours=1)),
         _history_row("Widget", datetime.now() - timedelta(hours=9)),
     ]
-    searcher = FakeSearcher()
     _monitor(_sheet_with_history(rows, ["Widget"]), searcher, logger).update()
-    assert searcher.priced == []
+    assert searcher.swept == []
 
 
-def test_an_unparseable_timestamp_does_not_suppress_a_refresh(logger):
+def test_an_unparseable_timestamp_does_not_suppress_a_refresh(logger, searcher):
     """A hand-edited sheet should cause an extra lookup, never a silent skip."""
     row = _history_row("Widget", datetime.now())
     row["timestamp"] = "yesterday-ish"
     sheet = _sheet_with_history([row], ["Widget"])
-    searcher = FakeSearcher()
     _monitor(sheet, searcher, logger).update()
-    assert searcher.priced == ["Widget"]
+    assert searcher.swept == ["Widget"]
 
 
-def test_skipping_every_item_writes_nothing(logger):
+def test_skipping_every_item_writes_nothing(logger, searcher):
     recent = datetime.now() - timedelta(hours=1)
     sheet = _sheet_with_history([_history_row("Widget", recent)], ["Widget"])
     before = len(sheet.tabs["Prices"])
-    _monitor(sheet, FakeSearcher(), logger).update()
+    _monitor(sheet, searcher, logger).update()
     assert len(sheet.tabs["Prices"]) == before
 
 
-def test_poll_still_prices_a_brand_new_item(logger):
+def test_poll_still_sweeps_a_brand_new_item(logger, searcher):
     """poll() handles items with no history, so the recency filter must not
     reach it — a newly added item is priced immediately, not in six hours."""
     recent = datetime.now() - timedelta(hours=1)
     sheet = _sheet_with_history([_history_row("Widget", recent)], ["Widget", "Gadget"])
     sheet.modified = True
-    searcher = FakeSearcher()
     _monitor(sheet, searcher, logger).poll()
-    assert searcher.priced == ["Gadget"]
+    assert searcher.swept == ["Gadget"]
 
 
 def test_parser_accepts_force():
@@ -446,10 +339,10 @@ def test_force_defaults_to_off():
     assert args_parser().parse_args(["--secrets", "/tmp/s"]).force is False
 
 
-def test_sigterm_handler_sets_the_stop_event(logger):
+def test_sigterm_handler_sets_the_stop_event(logger, searcher):
     """A service manager stops the process with SIGTERM, which Python does not
     catch by default — without this the worker thread dies mid-write."""
-    monitor = _monitor(FakeSheet({"Items": _items([])}), FakeSearcher(), logger)
+    monitor = _monitor(FakeSheet({"Items": _items([])}), searcher, logger)
     installed: dict[int, object] = {}
 
     def fake_signal(signum, handler):
@@ -482,40 +375,24 @@ class RecordingNotifier:
 
 
 def _monitor_with_notifier(
-    sheet: FakeSheet,
-    searcher: FakeSearcher,
-    logger: logging.Logger,
-    market_searcher: FakeMarketSearcher | None = None,
+    sheet: FakeSheet, searcher: FakeMarketSearcher, logger: logging.Logger
 ) -> tuple[PriceMonitor, RecordingNotifier]:
-    monitor = _monitor(sheet, searcher, logger, market_searcher)
+    monitor = _monitor(sheet, searcher, logger)
     notifier = RecordingNotifier()
     monitor.notifier = notifier
     return monitor, notifier
 
 
-def test_for_test_monitor_has_notifications_disabled(logger):
-    monitor = _monitor(
-        FakeSheet({"Items": _items([{"item": "Widget", "website": "shop.example"}])}),
-        FakeSearcher(),
-        logger,
-    )
+def test_for_test_monitor_has_notifications_disabled(logger, searcher):
+    monitor = _monitor(FakeSheet({"Items": _items(["Widget"])}), searcher, logger)
     assert monitor.msg_client is None
     assert monitor.notifier.enabled is False
     monitor.update()  # the no-op notifier must not get in the way
 
 
-def test_update_brackets_the_check_with_start_and_complete(logger):
-    sheet = FakeSheet(
-        {
-            "Items": _items(
-                [
-                    {"item": "Widget", "website": "shop.example"},
-                    {"item": "Gadget", "website": "shop.example"},
-                ]
-            )
-        }
-    )
-    monitor, notifier = _monitor_with_notifier(sheet, FakeSearcher(), logger)
+def test_update_brackets_the_check_with_start_and_complete(logger, searcher):
+    sheet = FakeSheet({"Items": _items(["Widget", "Gadget"])})
+    monitor, notifier = _monitor_with_notifier(sheet, searcher, logger)
     monitor.update()
 
     assert notifier.messages == [
@@ -524,15 +401,10 @@ def test_update_brackets_the_check_with_start_and_complete(logger):
     ]
 
 
-def test_a_failing_lookup_is_reported_as_a_failure(logger):
-    class BrokenSearcher(FakeSearcher):
-        def price(self, item, last_price, timestamp):
-            raise RuntimeError("site down")
-
-    sheet = FakeSheet(
-        {"Items": _items([{"item": "Widget", "website": "shop.example"}])}
-    )
-    monitor, notifier = _monitor_with_notifier(sheet, BrokenSearcher(), logger)
+def test_a_failing_sweep_is_reported_as_a_failure(logger, searcher):
+    searcher.raises = RuntimeError("search down")
+    sheet = FakeSheet({"Items": _items(["Widget"])})
+    monitor, notifier = _monitor_with_notifier(sheet, searcher, logger)
     monitor.update()
 
     assert notifier.messages[-1] == (
@@ -540,11 +412,9 @@ def test_a_failing_lookup_is_reported_as_a_failure(logger):
     )
 
 
-def test_a_check_that_aborts_still_sends_a_failure_notice(logger):
-    sheet = FakeSheet(
-        {"Items": _items([{"item": "Widget", "website": "shop.example"}])}
-    )
-    monitor, notifier = _monitor_with_notifier(sheet, FakeSearcher(), logger)
+def test_a_check_that_aborts_still_sends_a_failure_notice(logger, searcher):
+    sheet = FakeSheet({"Items": _items(["Widget"])})
+    monitor, notifier = _monitor_with_notifier(sheet, searcher, logger)
     monitor.history.append = mock.Mock(side_effect=RuntimeError("sheet unreachable"))
 
     with pytest.raises(RuntimeError):
@@ -555,12 +425,10 @@ def test_a_check_that_aborts_still_sends_a_failure_notice(logger):
     )
 
 
-def test_an_aborted_check_is_logged_and_retried_by_the_loop(logger):
+def test_an_aborted_check_is_logged_and_retried_by_the_loop(logger, searcher):
     """_safe_run must still see the exception the notifier re-raised."""
-    sheet = FakeSheet(
-        {"Items": _items([{"item": "Widget", "website": "shop.example"}])}
-    )
-    monitor, notifier = _monitor_with_notifier(sheet, FakeSearcher(), logger)
+    sheet = FakeSheet({"Items": _items(["Widget"])})
+    monitor, notifier = _monitor_with_notifier(sheet, searcher, logger)
     monitor.history.append = mock.Mock(side_effect=RuntimeError("sheet unreachable"))
 
     monitor._safe_run("Update", monitor.update)  # must not propagate
@@ -568,28 +436,24 @@ def test_an_aborted_check_is_logged_and_retried_by_the_loop(logger):
     assert notifier.messages[-1].startswith("❌ PriceMonitor update failed")
 
 
-def test_a_check_with_nothing_due_says_nothing(logger):
+def test_a_check_with_nothing_due_says_nothing(logger, searcher):
     sheet = FakeSheet({"Items": _items([])})
-    monitor, notifier = _monitor_with_notifier(sheet, FakeSearcher(), logger)
+    monitor, notifier = _monitor_with_notifier(sheet, searcher, logger)
     monitor.update()
     assert notifier.messages == []
 
 
-def test_an_idle_poll_says_nothing(logger):
-    sheet = FakeSheet(
-        {"Items": _items([{"item": "Widget", "website": "shop.example"}])}
-    )
-    monitor, notifier = _monitor_with_notifier(sheet, FakeSearcher(), logger)
+def test_an_idle_poll_says_nothing(logger, searcher):
+    sheet = FakeSheet({"Items": _items(["Widget"])})
+    monitor, notifier = _monitor_with_notifier(sheet, searcher, logger)
     sheet.modified = False
     monitor.poll()
     assert notifier.messages == []
 
 
-def test_a_poll_is_labelled_poll_not_update(logger):
-    sheet = FakeSheet(
-        {"Items": _items([{"item": "Widget", "website": "shop.example"}])}
-    )
-    monitor, notifier = _monitor_with_notifier(sheet, FakeSearcher(), logger)
+def test_a_poll_is_labelled_poll_not_update(logger, searcher):
+    sheet = FakeSheet({"Items": _items(["Widget"])})
+    monitor, notifier = _monitor_with_notifier(sheet, searcher, logger)
     sheet.modified = True
     monitor.poll()
 
@@ -621,25 +485,14 @@ def test_once_still_tears_down_the_msg_client(monkeypatch):
 # --- price-drop notifications ----------------------------------------------
 
 
-class FixedPriceSearcher(FakeSearcher):
-    """Returns a chosen price so a crossing can be staged deterministically."""
-
-    def __init__(self, price: float) -> None:
-        super().__init__()
-        self._fixed = price
-
-    def price(
-        self, item: Item, last_price: float | None, timestamp: datetime
-    ) -> PriceReading:
-        return replace(super().price(item, last_price, timestamp), price=self._fixed)
-
-
-def _price_row(
-    item: str, price: float, when: datetime, website: str = "shop.example"
-) -> dict[str, str]:
-    row = _history_row(item, when, website=website)
-    row["price"] = f"{price:.2f}"
-    return row
+def _seed(item: str, prices: list[float]) -> list[dict[str, str]]:
+    """Prior priced sweeps for ``item`` — new_drop_band stays silent below
+    _MIN_READINGS, so a drop test needs a settled baseline."""
+    old = datetime.now() - timedelta(hours=7)
+    return [
+        _history_row(item, old - timedelta(hours=len(prices) - i), price=price)
+        for i, price in enumerate(prices)
+    ]
 
 
 def _drops(notifier: RecordingNotifier) -> list[str]:
@@ -649,33 +502,23 @@ def _drops(notifier: RecordingNotifier) -> list[str]:
 def test_a_price_crossing_below_the_mean_is_announced(logger):
     """The baseline is read before the append, so the new low price is compared
     against the mean of what came before it, not one it has already pulled down."""
-    stale = datetime.now() - timedelta(hours=7)
-    rows = [
-        _price_row("Widget", 110.0, stale - timedelta(hours=2)),
-        _price_row("Widget", 120.0, stale - timedelta(hours=1)),
-        _price_row("Widget", 130.0, stale),
-    ]
+    sheet = _sheet_with_history(_seed("Widget", [110.0, 120.0, 130.0]), ["Widget"])
     monitor, notifier = _monitor_with_notifier(
-        _sheet_with_history(rows, ["Widget"]), FixedPriceSearcher(90.0), logger
+        sheet, FakeMarketSearcher(price=90.0), logger
     )
     monitor.update()
 
     assert notifier.messages[-1] == (
-        "📉 PriceMonitor — Widget at shop.example: 90.00 GBP, "
-        "below its 120.00 GBP mean (-25%)"
+        "📉 PriceMonitor — Widget: 90.00 GBP at argos.co.uk "
+        "(4.4 Trustpilot, confidence 0.90), below its 120.00 GBP mean (-25%)"
     )
 
 
 def test_a_price_that_stays_below_the_mean_is_not_re_announced(logger):
     """Six hours later the price is still low; the drop was already reported."""
-    stale = datetime.now() - timedelta(hours=7)
-    rows = [
-        _price_row("Widget", 130.0, stale - timedelta(hours=2)),
-        _price_row("Widget", 120.0, stale - timedelta(hours=1)),
-        _price_row("Widget", 90.0, stale),
-    ]
+    sheet = _sheet_with_history(_seed("Widget", [130.0, 120.0, 90.0]), ["Widget"])
     monitor, notifier = _monitor_with_notifier(
-        _sheet_with_history(rows, ["Widget"]), FixedPriceSearcher(89.0), logger
+        sheet, FakeMarketSearcher(price=89.0), logger
     )
     monitor.update()
 
@@ -683,35 +526,20 @@ def test_a_price_that_stays_below_the_mean_is_not_re_announced(logger):
 
 
 def test_an_item_with_too_little_history_announces_nothing(logger):
-    stale = datetime.now() - timedelta(hours=7)
-    rows = [
-        _price_row("Widget", 130.0, stale - timedelta(hours=1)),
-        _price_row("Widget", 110.0, stale),
-    ]
+    sheet = _sheet_with_history(_seed("Widget", [130.0, 110.0]), ["Widget"])
     monitor, notifier = _monitor_with_notifier(
-        _sheet_with_history(rows, ["Widget"]), FixedPriceSearcher(90.0), logger
+        sheet, FakeMarketSearcher(price=90.0), logger
     )
     monitor.update()
 
     assert _drops(notifier) == []
 
 
-def test_a_lookup_that_found_no_price_announces_nothing(logger):
-    """A reading with no price has nothing to compare against the mean."""
-
-    class BrokenSearcher(FakeSearcher):
-        def price(self, item, last_price, timestamp):
-            raise RuntimeError("site down")
-
-    stale = datetime.now() - timedelta(hours=7)
-    rows = [
-        _price_row("Widget", 130.0, stale - timedelta(hours=2)),
-        _price_row("Widget", 120.0, stale - timedelta(hours=1)),
-        _price_row("Widget", 110.0, stale),
-    ]
-    monitor, notifier = _monitor_with_notifier(
-        _sheet_with_history(rows, ["Widget"]), BrokenSearcher(), logger
-    )
+def test_a_sweep_that_found_no_price_announces_nothing(logger, searcher):
+    """A reading with no cheapest detection has nothing to compare."""
+    searcher.raises = RuntimeError("search down")
+    sheet = _sheet_with_history(_seed("Widget", [130.0, 120.0, 110.0]), ["Widget"])
+    monitor, notifier = _monitor_with_notifier(sheet, searcher, logger)
     monitor.update()
 
     assert _drops(notifier) == []
@@ -720,32 +548,23 @@ def test_a_lookup_that_found_no_price_announces_nothing(logger):
 def test_a_slow_slide_past_the_next_step_is_announced_again(logger):
     """The price already crossed below the mean; giving up another step must
     still report, or a long steady decline goes silent after one message."""
-    stale = datetime.now() - timedelta(hours=7)
-    rows = [
-        _price_row("Widget", 100.0, stale - timedelta(hours=2)),
-        _price_row("Widget", 100.0, stale - timedelta(hours=1)),
-        _price_row("Widget", 95.0, stale),
-    ]
+    sheet = _sheet_with_history(_seed("Widget", [100.0, 100.0, 95.0]), ["Widget"])
     monitor, notifier = _monitor_with_notifier(
-        _sheet_with_history(rows, ["Widget"]), FixedPriceSearcher(88.0), logger
+        sheet, FakeMarketSearcher(price=88.0), logger
     )
     monitor.update()
 
     assert notifier.messages[-1] == (
-        "📉 PriceMonitor — Widget at shop.example: 88.00 GBP, still falling, "
+        "📉 PriceMonitor — Widget: 88.00 GBP at argos.co.uk "
+        "(4.4 Trustpilot, confidence 0.90), still falling, "
         "below its 98.33 GBP mean (-11%)"
     )
 
 
 def test_a_fall_that_stays_inside_its_step_is_not_announced_again(logger):
-    stale = datetime.now() - timedelta(hours=7)
-    rows = [
-        _price_row("Widget", 100.0, stale - timedelta(hours=2)),
-        _price_row("Widget", 100.0, stale - timedelta(hours=1)),
-        _price_row("Widget", 95.0, stale),
-    ]
+    sheet = _sheet_with_history(_seed("Widget", [100.0, 100.0, 95.0]), ["Widget"])
     monitor, notifier = _monitor_with_notifier(
-        _sheet_with_history(rows, ["Widget"]), FixedPriceSearcher(94.0), logger
+        sheet, FakeMarketSearcher(price=94.0), logger
     )
     monitor.update()
 
@@ -754,241 +573,35 @@ def test_a_fall_that_stays_inside_its_step_is_not_announced_again(logger):
 
 def test_a_sharp_first_crossing_is_not_worded_as_still_falling(logger):
     """Landing several steps down in one go is still a first drop, not a slide."""
-    stale = datetime.now() - timedelta(hours=7)
-    rows = [
-        _price_row("Widget", 110.0, stale - timedelta(hours=2)),
-        _price_row("Widget", 120.0, stale - timedelta(hours=1)),
-        _price_row("Widget", 130.0, stale),
-    ]
+    sheet = _sheet_with_history(_seed("Widget", [110.0, 120.0, 130.0]), ["Widget"])
     monitor, notifier = _monitor_with_notifier(
-        _sheet_with_history(rows, ["Widget"]), FixedPriceSearcher(90.0), logger
+        sheet, FakeMarketSearcher(price=90.0), logger
     )
     monitor.update()
 
     assert "still falling" not in notifier.messages[-1]
 
 
-# --- market sweep ------------------------------------------------------------
-
-
-def test_an_opted_in_item_is_priced_twice(logger, market_searcher):
-    sheet = FakeSheet(
-        {
-            "Items": _items_with_market(
-                [{"item": "Widget", "website": "shop.example", "market": "yes"}]
-            )
-        }
-    )
-    searcher = FakeSearcher()
-    _monitor(sheet, searcher, logger, market_searcher).update(force=True)
-
-    websites = list(sheet.tabs["Prices"]["website"])
-    assert len(sheet.tabs["Prices"]) == 2
-    assert "shop.example" in websites
-    assert MARKET_KEY in websites
-    assert market_searcher.calls == ["Widget"]
-
-
-def test_the_same_item_at_two_websites_is_swept_only_once(logger, market_searcher):
-    """Both rows are opted in for the same product name, tracked at two
-    retailers. Each row must still get its own supplier reading, but the
-    sweep is not tied to a supplier and must fire only once."""
-    sheet = FakeSheet(
-        {
-            "Items": _items_with_market(
-                [
-                    {"item": "Widget", "website": "shop-a.example", "market": "yes"},
-                    {"item": "Widget", "website": "shop-b.example", "market": "yes"},
-                ]
-            )
-        }
-    )
-    searcher = FakeSearcher()
-    _monitor(sheet, searcher, logger, market_searcher).update(force=True)
-
-    prices = sheet.tabs["Prices"]
-    assert len(prices) == 3
-    assert list(prices["website"]).count("shop-a.example") == 1
-    assert list(prices["website"]).count("shop-b.example") == 1
-    assert list(prices["website"]).count(MARKET_KEY) == 1
-    assert market_searcher.calls == ["Widget"]
-
-
-def test_two_different_items_are_each_swept(logger, market_searcher):
-    sheet = FakeSheet(
-        {
-            "Items": _items_with_market(
-                [
-                    {"item": "Widget", "website": "shop-a.example", "market": "yes"},
-                    {"item": "Gadget", "website": "shop-b.example", "market": "yes"},
-                ]
-            )
-        }
-    )
-    searcher = FakeSearcher()
-    _monitor(sheet, searcher, logger, market_searcher).update(force=True)
-
-    assert market_searcher.calls == ["Widget", "Gadget"]
-
-
-def test_an_opted_out_item_is_priced_once(logger, market_searcher):
-    sheet = FakeSheet(
-        {
-            "Items": _items_with_market(
-                [{"item": "Widget", "website": "shop.example", "market": ""}]
-            )
-        }
-    )
-    _monitor(sheet, FakeSearcher(), logger, market_searcher).update(force=True)
-    assert len(sheet.tabs["Prices"]) == 1
-    assert market_searcher.calls == []
-
-
-def test_an_opted_in_item_without_a_market_searcher_is_priced_once(logger):
-    """`for_test` allows building a controller with no market searcher at
-    all; an opted-in item must degrade to supplier-only, not raise."""
-    sheet = FakeSheet(
-        {
-            "Items": _items_with_market(
-                [{"item": "Widget", "website": "shop.example", "market": "yes"}]
-            )
-        }
-    )
-    _monitor(sheet, FakeSearcher(), logger, None).update(force=True)
-    assert len(sheet.tabs["Prices"]) == 1
-    assert list(sheet.tabs["Prices"]["website"]) == ["shop.example"]
-
-
-def test_the_sweep_receives_the_markets_last_price_not_the_suppliers(
-    logger, market_searcher
-):
-    """The two lookups keep separate (item, website) series in history, so a
-    crossed key would hand the sweep the supplier's last price — and
-    MarketSearcher would then flag a legitimately cheaper market figure as
-    having suspiciously moved against the wrong baseline."""
-
-    class RecordingSearcher(FakeSearcher):
-        def __init__(self) -> None:
-            super().__init__()
-            self.seen_last_price: float | None = None
-
-        def price(
-            self, item: Item, last_price: float | None, timestamp: datetime
-        ) -> PriceReading:
-            self.seen_last_price = last_price
-            return super().price(item, last_price, timestamp)
-
-    old = datetime.now() - timedelta(hours=7)
-    rows = [
-        _price_row("Widget", 100.0, old),
-        _price_row("Widget", 40.0, old, website=MARKET_KEY),
-    ]
-    sheet = _sheet_with_history(rows, ["Widget"], market=True)
-    searcher = RecordingSearcher()
-    _monitor(sheet, searcher, logger, market_searcher).update(force=True)
-
-    assert searcher.seen_last_price == 100.0
-    assert market_searcher.seen_last_price == 40.0
-
-
-def test_a_failing_sweep_does_not_cost_the_supplier_price(logger, market_searcher):
-    sheet = FakeSheet(
-        {
-            "Items": _items_with_market(
-                [{"item": "Widget", "website": "shop.example", "market": "yes"}]
-            )
-        }
-    )
-    market_searcher.raises = RuntimeError("sweep exploded")
-    _monitor(sheet, FakeSearcher(), logger, market_searcher).update(force=True)
-
-    prices = sheet.tabs["Prices"]
-    supplier = prices[prices["website"] == "shop.example"]
-    swept = prices[prices["website"] == MARKET_KEY]
-    assert supplier.iloc[0]["status"] == PriceStatus.OK.value
-    assert swept.iloc[0]["status"] == PriceStatus.ERROR.value
-
-
 # --- confidence gate ---------------------------------------------------------
 
 
-def _seed_market_history(item: str, prices: list[float]) -> list[dict[str, str]]:
-    """Three prior priced rows for ``(item, MARKET_KEY)`` — new_drop_band stays
-    silent below _MIN_READINGS, so a drop test needs a settled baseline."""
-    old = datetime.now() - timedelta(hours=7)
-    return [
-        _price_row(
-            item, price, old - timedelta(hours=len(prices) - i), website=MARKET_KEY
-        )
-        for i, price in enumerate(prices)
-    ]
-
-
-def _seed_supplier_history(item: str, prices: list[float]) -> list[dict[str, str]]:
-    """Three prior priced rows for ``(item, shop.example)``, same reasoning."""
-    old = datetime.now() - timedelta(hours=7)
-    return [
-        _price_row(item, price, old - timedelta(hours=len(prices) - i))
-        for i, price in enumerate(prices)
-    ]
-
-
-def test_a_low_confidence_drop_is_recorded_but_not_announced(logger, market_searcher):
-    sheet = FakeSheet(
-        {
-            "Items": _items_with_market(
-                [{"item": "Widget", "website": "shop.example", "market": "yes"}]
-            ),
-            "Prices": pd.DataFrame(
-                _seed_market_history("Widget", [200.0, 200.0, 200.0])
-            ),
-        }
-    )
-    market_searcher.price = 100.0
-    market_searcher.confidence = 0.4
+def test_a_low_confidence_drop_is_recorded_but_not_announced(logger):
+    sheet = _sheet_with_history(_seed("Widget", [200.0, 200.0, 200.0]), ["Widget"])
     monitor, notifier = _monitor_with_notifier(
-        sheet, FakeSearcher(), logger, market_searcher
+        sheet, FakeMarketSearcher(price=100.0, confidence=0.4), logger
     )
     monitor.update(force=True)
 
     prices = sheet.tabs["Prices"]
-    swept = prices[prices["website"] == MARKET_KEY]
-    assert any(float(p) == 100.0 for p in swept["price"])
+    assert "100.00" in list(prices["cheapest_price"])
     assert _drops(notifier) == []
 
 
-def test_a_confident_drop_is_announced(logger, market_searcher):
-    sheet = FakeSheet(
-        {
-            "Items": _items_with_market(
-                [{"item": "Widget", "website": "shop.example", "market": "yes"}]
-            ),
-            "Prices": pd.DataFrame(
-                _seed_market_history("Widget", [200.0, 200.0, 200.0])
-            ),
-        }
-    )
-    market_searcher.price = 100.0
-    market_searcher.confidence = 0.9
+def test_a_confident_drop_is_announced(logger):
+    sheet = _sheet_with_history(_seed("Widget", [200.0, 200.0, 200.0]), ["Widget"])
     monitor, notifier = _monitor_with_notifier(
-        sheet, FakeSearcher(), logger, market_searcher
+        sheet, FakeMarketSearcher(price=100.0, confidence=0.9), logger
     )
     monitor.update(force=True)
 
-    assert any("📉" in m and "argos.co.uk" in m for m in _drops(notifier))
-
-
-def test_a_supplier_drop_is_unaffected_by_the_confidence_gate(logger):
-    """Supplier readings carry no confidence, so the gate must ignore them."""
-    sheet = FakeSheet(
-        {
-            "Items": _items([{"item": "Widget", "website": "shop.example"}]),
-            "Prices": pd.DataFrame(
-                _seed_supplier_history("Widget", [200.0, 200.0, 200.0])
-            ),
-        }
-    )
-    monitor, notifier = _monitor_with_notifier(sheet, FixedPriceSearcher(100.0), logger)
-    monitor.update(force=True)
-
-    assert _drops(notifier) != []
+    assert any("argos.co.uk" in message for message in _drops(notifier))

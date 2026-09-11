@@ -1,9 +1,10 @@
 """Value objects for PriceMonitor.
 
-Defines the tracked :class:`Item` and :class:`PriceReading` recorded for it on
-each run, the :class:`PriceStatus` describing how that reading turned out, and
-the :class:`PriceStats` summarising an item's history so far. Exports the
-:data:`MARKET_KEY` sentinel and :func:`supplier_domain` utility for market sweeps.
+Defines the tracked :class:`Item`, the :class:`Detection` naming one retailer's
+offer, and the :class:`PriceReading` recorded for it on each run, the
+:class:`PriceStatus` describing how that reading turned out, and the
+:class:`PriceStats` summarising an item's history so far. Exports the
+:func:`supplier_domain` utility that renders a candidate's URL as a site.
 """
 
 from dataclasses import dataclass
@@ -11,14 +12,9 @@ from datetime import datetime
 from enum import Enum
 from urllib.parse import urlparse
 
-# The sentinel `website` under which a UK-wide market sweep is recorded, so its
-# readings share the history tab with per-supplier ones while keeping their own
-# (item, website) series: their own mean, baseline and drop bands.
-MARKET_KEY = "market"
-
 
 def supplier_domain(url: str) -> str:
-    """The bare domain of ``url``, as the sheet's ``best_supplier`` value."""
+    """The bare domain of ``url``, as a :class:`Detection`'s ``site`` value."""
     netloc = urlparse(url.strip()).netloc.lower()
     return netloc[4:] if netloc.startswith("www.") else netloc
 
@@ -51,39 +47,29 @@ class Detection:
 
 @dataclass(frozen=True)
 class Item:
-    """One tracked product, as written on the Items tab."""
+    """One tracked product. The user types only its name."""
 
     name: str
-    website: str
-    market: bool = False
-
-    @property
-    def is_direct_url(self) -> bool:
-        """True when ``website`` names a product page rather than a site to search."""
-        target = self.website.strip()
-        for scheme in ("https://", "http://"):
-            if target.lower().startswith(scheme):
-                target = target[len(scheme) :]
-                break
-        _, _, remainder = target.partition("/")
-        return bool(remainder.strip())
 
 
 @dataclass(frozen=True)
 class PriceReading:
-    """A single observation of an item's price at a point in time."""
+    """One sweep's result for one item.
+
+    A detection is ``None`` when the sweep could not produce it: no rated
+    candidate for ``best_rated``, no surviving candidate at all for any of them.
+    """
 
     timestamp: datetime
     item: str
-    website: str
-    price: float | None
     currency: str
     status: PriceStatus
-    source_url: str = ""
-    note: str = ""
+    best_rated: Detection | None = None
+    cheapest: Detection | None = None
+    best_value: Detection | None = None
     confidence: float | None = None
-    rating: str = ""
     sources: int | None = None
+    note: str = ""
 
 
 # Below this many readings the mean tracks jitter rather than a settled price,

@@ -1,11 +1,11 @@
 """UK-wide market sweep.
 
 Asks a search-grounded model what an item costs across UK retailers generally,
-ranks the answers, and records the cheapest one that survives validation with a
-confidence score describing how much the sweep supports it. Mirrors
-:class:`~price_monitor.search.searcher.PriceSearcher`'s two-call shape for the
-same reason: grounding and structured output are unreliable together. Nothing
-raises out of :meth:`price_market`.
+then reports three answers from the candidates that survive validation — the
+best-rated retailer, the cheapest, and the best compromise between them — with
+a confidence score describing how much the sweep supports them. Two calls,
+because grounding and structured output are unreliable together. Nothing raises
+out of :meth:`price_market`.
 """
 
 import logging
@@ -16,8 +16,9 @@ from llmbridge.exceptions import LLMError
 from py_utils.logger import get_child_logger
 
 from price_monitor.app_config import LLMConfig, PriceCtrl
-from price_monitor.models import MARKET_KEY, Item, PriceReading, PriceStatus
+from price_monitor.models import Item, PriceReading, PriceStatus
 from price_monitor.search.confidence import Candidate, score
+from price_monitor.search.detections import select, to_detection
 from price_monitor.search.gemini_search import grounding_urls
 from price_monitor.search.json_extract import extract_json
 from price_monitor.search.prompts import market_format_prompt, market_prompt
@@ -126,20 +127,20 @@ class MarketSearcher:
             return self._failed(item, timestamp, PriceStatus.NOT_FOUND, note)
 
         candidates = [candidate for candidate, _ in pairs]
-        winner = min(candidates, key=lambda c: c.price)
-        # `is`, not `==`: two candidates can share identical field values, and
-        # only the object actually chosen as winner carries the right note.
-        winner_vat_note = next(n for c, n in pairs if c is winner)
+        rated_pick, cheapest_pick, value_pick = select(
+            candidates, self._ctrl.rating_premium_pct
+        )
+        # `is`, not `==`: two candidates can share every field value, and only
+        # the object actually chosen carries the right VAT note.
+        winner_vat_note = next(n for c, n in pairs if c is cheapest_pick)
         value, reason = score(candidates, urls)
 
         status = PriceStatus.OK
         note = reason
         if winner_vat_note:
-            # Only the winner's note matters — a discarded candidate's VAT
-            # adjustment never reaches the sheet, same as its price.
             note = f"{note}; {winner_vat_note}"
         if last_price is not None and last_price > 0:
-            move = abs(winner.price - last_price) / last_price
+            move = abs(cheapest_pick.price - last_price) / last_price
             if move > self._ctrl.suspect_threshold:
                 status = PriceStatus.SUSPECT
                 note = f"{note}; moved {move:.0%} from {last_price}"
@@ -147,18 +148,17 @@ class MarketSearcher:
         return PriceReading(
             timestamp=timestamp,
             item=item.name,
-            website=MARKET_KEY,
-            price=winner.price,
             currency=self._ctrl.currency,
             status=status,
-            source_url=winner.url,
-            note=note,
+            best_rated=to_detection(rated_pick),
+            cheapest=to_detection(cheapest_pick),
+            best_value=to_detection(value_pick),
             confidence=value,
-            rating=winner.rating_label,
             # Survivors, not the number the model named: a retailer that is
             # out of stock or failed validation cannot sell it, and this is
             # the same count corroboration scored.
             sources=len(candidates),
+            note=note,
         )
 
     def _candidates(self, payload: dict) -> list[tuple[Candidate, str]]:
@@ -209,8 +209,6 @@ class MarketSearcher:
         return PriceReading(
             timestamp=timestamp,
             item=item.name,
-            website=MARKET_KEY,
-            price=None,
             currency=self._ctrl.currency,
             status=status,
             note=note,

@@ -1,9 +1,9 @@
 """Append-only price history tab.
 
-Owns the long-format Prices tab: one row per item per run, plus the statistics
-derived from it. A market sweep is recorded as a second row under the
-``MARKET_KEY`` sentinel website, kept out of ``summarise()`` and reported
-separately by ``market_summary()``. Sheet values arrive as strings, so prices
+Owns the long-format Prices tab: one wide row per sweep, carrying the three
+detections it produced, plus the statistics derived from them. Only the
+cheapest series has a mean — the best-rated retailer's price says more about
+that retailer than about the market. Sheet values arrive as strings, so prices
 are coerced on read and rendered back as strings on write.
 """
 
@@ -13,7 +13,7 @@ from datetime import datetime
 import pandas as pd
 from py_utils.logger import get_child_logger
 
-from price_monitor.models import MARKET_KEY, PriceReading, PriceStats, supplier_domain
+from price_monitor.models import Detection, PriceReading, PriceStats
 from price_monitor.sheets.protocol import SheetInterface
 
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -21,36 +21,52 @@ TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 # `status` MUST stay last. The Sheets API omits trailing empty cells from each
 # row, and when every row in a read comes back short, pandas does not pad —
 # it raises inside GoogleSheetInterface.read() before this module ever sees
-# the data, so there is nothing we can do to recover once that happens. Both
-# `source_url` and `note` are blank on most readings, so if either sat last
-# a fully-successful run's history could become permanently unreadable.
-# `status` is always a non-empty PriceStatus value, so it anchors the row
-# width. Do not "tidy" it back into the middle. `confidence` and `rating` are
-# blank on every supplier row (most rows), so they too must sit before it.
+# the data, so there is nothing we can do to recover once that happens. Every
+# other column here is blank on a failed sweep: all nine detection cells, the
+# confidence, the source count and often the note. `status` is always a
+# non-empty PriceStatus value, so it alone anchors the row width. Do not
+# "tidy" it back into the middle.
 COLUMNS = [
     "timestamp",
     "item",
-    "website",
-    "price",
-    "currency",
-    "source_url",
-    "note",
+    "rated_price",
+    "rated_site",
+    "rated_rating",
+    "cheapest_price",
+    "cheapest_site",
+    "cheapest_rating",
+    "value_price",
+    "value_site",
+    "value_rating",
     "confidence",
-    "rating",
     "sources",
+    "note",
     "status",
 ]
 
-SUMMARY_COLUMNS = ["item", "website", "current", "min", "mean", "last_checked"]
-
-MARKET_SUMMARY_COLUMNS = [
+SUMMARY_COLUMNS = [
     "item",
-    "best_price",
-    "best_supplier",
-    "best_supplier_rating",
+    "rated_price",
+    "rated_site",
+    "rated_rating",
+    "cheapest_price",
+    "cheapest_site",
+    "cheapest_rating",
+    "value_price",
+    "value_site",
+    "value_rating",
+    "min",
+    "mean",
     "confidence",
     "sources",
-    "market_checked",
+    "last_checked",
+]
+
+_DETECTION_PREFIXES = ("rated", "cheapest", "value")
+_DETECTION_FIELDS = [
+    f"{prefix}_{suffix}"
+    for prefix in _DETECTION_PREFIXES
+    for suffix in ("price", "site", "rating")
 ]
 
 
@@ -98,43 +114,43 @@ class HistoryTab:
 
         self.logger.info(f"Appended {len(readings)} readings")
 
-    def last_prices(self) -> dict[tuple[str, str], float]:
-        """Most recent non-null price for each (item, website) pair."""
+    def last_prices(self) -> dict[str, float]:
+        """Most recent non-null cheapest price for each item."""
         frame = self._typed()
-        prices: dict[tuple[str, str], float] = {}
+        prices: dict[str, float] = {}
         if frame.empty:
             return prices
-        priced = frame[frame["price"].notna()]
-        for key, group in priced.groupby(["item", "website"], sort=False):
+        priced = frame[frame["cheapest_price"].notna()]
+        for item, group in priced.groupby("item", sort=False):
             ordered = group.sort_values("timestamp", kind="stable")
-            prices[key] = float(ordered["price"].iloc[-1])
+            prices[item] = float(ordered["cheapest_price"].iloc[-1])
         return prices
 
-    def price_stats(self) -> dict[tuple[str, str], PriceStats]:
-        """Mean, most recent price, and reading count per (item, website) pair.
+    def price_stats(self) -> dict[str, PriceStats]:
+        """Mean, most recent cheapest price, and reading count per item.
 
-        Only rows that carry a price count: a failed lookup must not drag the
-        mean or masquerade as the last price. Pairs with no priced row at all
-        are absent rather than present-and-empty.
+        Only rows that carry a cheapest price count: a failed sweep must not
+        drag the mean or masquerade as the last price. Items with no priced row
+        at all are absent rather than present-and-empty.
         """
         frame = self._typed()
         if frame.empty:
             return {}
-        stats: dict[tuple[str, str], PriceStats] = {}
-        priced = frame[frame["price"].notna()]
-        for key, group in priced.groupby(["item", "website"], sort=False):
+        stats: dict[str, PriceStats] = {}
+        priced = frame[frame["cheapest_price"].notna()]
+        for item, group in priced.groupby("item", sort=False):
             ordered = group.sort_values("timestamp", kind="stable")
-            stats[key] = PriceStats(
-                mean=float(ordered["price"].mean()),
-                last=float(ordered["price"].iloc[-1]),
+            stats[item] = PriceStats(
+                mean=float(ordered["cheapest_price"].mean()),
+                last=float(ordered["cheapest_price"].iloc[-1]),
                 count=len(ordered),
             )
         return stats
 
-    def last_checked(self) -> dict[tuple[str, str], datetime]:
-        """Most recent check time for each (item, website) pair, any status.
+    def last_checked(self) -> dict[str, datetime]:
+        """Most recent sweep time for each item, any status.
 
-        Any status counts: a failed lookup still spent an API call, so it must
+        Any status counts: a failed sweep still spent an API call, so it must
         still hold off the next one. Rows whose timestamp does not parse are
         ignored, which leaves the item looking unchecked — a hand-edited sheet
         should cause an extra refresh, never silently suppress one.
@@ -148,118 +164,92 @@ class HistoryTab:
         )
         frame = frame[frame["_checked"].notna()]
         return {
-            key: group["_checked"].max().to_pydatetime()
-            for key, group in frame.groupby(["item", "website"], sort=False)
+            item: group["_checked"].max().to_pydatetime()
+            for item, group in frame.groupby("item", sort=False)
         }
 
-    def known_items(self) -> set[tuple[str, str]]:
-        """Every (item, website) pair that has ever been recorded."""
+    def known_items(self) -> set[str]:
+        """Every item that has ever been swept."""
         frame = self.read()
         if frame.empty:
             return set()
-        return set(zip(frame["item"], frame["website"]))
+        return set(frame["item"])
 
     def summarise(self) -> pd.DataFrame:
-        """Per-item current, min, mean, and last-checked timestamp."""
-        frame = self._typed()
-        if frame.empty:
-            return pd.DataFrame(columns=SUMMARY_COLUMNS)
+        """Each item's latest detections, its cheapest min/mean, and when.
 
-        # Market rows are summarised separately: current/min/mean on the Items
-        # tab describe the tracked supplier, not the market.
-        frame = frame[frame["website"] != MARKET_KEY]
-        if frame.empty:
-            return pd.DataFrame(columns=SUMMARY_COLUMNS)
-
-        rows = []
-        for (item, website), group in frame.groupby(["item", "website"], sort=False):
-            ordered = group.sort_values("timestamp", kind="stable")
-            priced = ordered[ordered["price"].notna()]
-            rows.append(
-                {
-                    "item": item,
-                    "website": website,
-                    "current": (
-                        float(priced["price"].iloc[-1]) if not priced.empty else ""
-                    ),
-                    "min": float(priced["price"].min()) if not priced.empty else "",
-                    "mean": (
-                        round(float(priced["price"].mean()), 2)
-                        if not priced.empty
-                        else ""
-                    ),
-                    # Any status, so a run of failures shows as a moving
-                    # timestamp beside a stale price rather than looking healthy.
-                    "last_checked": ordered["timestamp"].iloc[-1],
-                }
-            )
-        return pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
-
-    def market_summary(self) -> pd.DataFrame:
-        """Latest market sweep per item, for the Items tab's market columns.
-
-        ``best_price`` is the most recent *priced* sweep, while
-        ``market_checked`` moves on every sweep of any status — so a run of
+        The detection cells come from the latest *priced* sweep while
+        ``last_checked`` moves on every sweep of any status, so a run of
         failures shows as a moving timestamp beside a stale price rather than
         looking healthy.
         """
         frame = self._typed()
         if frame.empty:
-            return pd.DataFrame(columns=MARKET_SUMMARY_COLUMNS)
-
-        market = frame[frame["website"] == MARKET_KEY]
-        if market.empty:
-            return pd.DataFrame(columns=MARKET_SUMMARY_COLUMNS)
+            return pd.DataFrame(columns=SUMMARY_COLUMNS)
 
         rows = []
-        for item, group in market.groupby("item", sort=False):
+        for item, group in frame.groupby("item", sort=False):
             ordered = group.sort_values("timestamp", kind="stable")
-            priced = ordered[ordered["price"].notna()]
+            priced = ordered[ordered["cheapest_price"].notna()]
             latest = priced.iloc[-1] if not priced.empty else None
-            rows.append(
-                {
-                    "item": item,
-                    "best_price": float(latest["price"]) if latest is not None else "",
-                    "best_supplier": (
-                        supplier_domain(str(latest["source_url"]))
-                        if latest is not None
-                        else ""
-                    ),
-                    "best_supplier_rating": (
-                        str(latest["rating"]) if latest is not None else ""
-                    ),
-                    "confidence": (
-                        str(latest["confidence"]) if latest is not None else ""
-                    ),
-                    "sources": str(latest["sources"]) if latest is not None else "",
-                    "market_checked": ordered["timestamp"].iloc[-1],
-                }
+            row = {"item": item}
+            for field in _DETECTION_FIELDS:
+                value = "" if latest is None else latest[field]
+                row[field] = _price_cell(value) if field.endswith("_price") else value
+            row["min"] = (
+                float(priced["cheapest_price"].min()) if not priced.empty else ""
             )
-        return pd.DataFrame(rows, columns=MARKET_SUMMARY_COLUMNS)
+            row["mean"] = (
+                round(float(priced["cheapest_price"].mean()), 2)
+                if not priced.empty
+                else ""
+            )
+            row["confidence"] = "" if latest is None else str(latest["confidence"])
+            row["sources"] = "" if latest is None else str(latest["sources"])
+            row["last_checked"] = ordered["timestamp"].iloc[-1]
+            rows.append(row)
+        return pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
 
     def _typed(self) -> pd.DataFrame:
-        """History with the price column coerced to numbers, blanks becoming NaN."""
+        """History with the cheapest price coerced to numbers, blanks to NaN."""
         frame = self.read()
         if frame.empty:
             return frame
         frame = frame.copy()
-        frame["price"] = pd.to_numeric(frame["price"], errors="coerce")
+        frame["cheapest_price"] = pd.to_numeric(
+            frame["cheapest_price"], errors="coerce"
+        )
         return frame
 
 
-def _to_row(reading: PriceReading) -> dict[str, str]:
+def _price_cell(value: object) -> float | str:
+    """A recorded price as a number, or blank when the sweep had none."""
+    number = pd.to_numeric(value, errors="coerce")
+    return "" if pd.isna(number) else float(number)
+
+
+def _detection_cells(prefix: str, detection: Detection | None) -> dict[str, str]:
+    if detection is None:
+        return {f"{prefix}_price": "", f"{prefix}_site": "", f"{prefix}_rating": ""}
     return {
+        f"{prefix}_price": f"{detection.price:.2f}",
+        f"{prefix}_site": detection.site,
+        f"{prefix}_rating": detection.rating,
+    }
+
+
+def _to_row(reading: PriceReading) -> dict[str, str]:
+    row = {
         "timestamp": reading.timestamp.strftime(TIMESTAMP_FORMAT),
         "item": reading.item,
-        "website": reading.website,
-        "price": "" if reading.price is None else f"{reading.price:.2f}",
-        "currency": reading.currency,
-        "source_url": reading.source_url,
-        "note": reading.note,
         "confidence": (
             "" if reading.confidence is None else f"{reading.confidence:.2f}"
         ),
-        "rating": reading.rating,
         "sources": "" if reading.sources is None else str(reading.sources),
+        "note": reading.note,
         "status": reading.status.value,
     }
+    row.update(_detection_cells("rated", reading.best_rated))
+    row.update(_detection_cells("cheapest", reading.cheapest))
+    row.update(_detection_cells("value", reading.best_value))
+    return row
