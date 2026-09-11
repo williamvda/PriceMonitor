@@ -36,6 +36,20 @@ class PriceStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class Detection:
+    """One retailer's offer, as one of a sweep's three answers.
+
+    ``rating`` is the display string the sheet shows, already formatted — it is
+    never parsed back into a number. Ranking happens on :class:`Candidate`
+    before a detection is built.
+    """
+
+    price: float
+    site: str
+    rating: str = ""
+
+
+@dataclass(frozen=True)
 class Item:
     """One tracked product, as written on the Items tab."""
 

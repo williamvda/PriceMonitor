@@ -155,3 +155,18 @@ def test_reading_defaults_carry_no_confidence_or_rating():
     )
     assert reading.confidence is None
     assert reading.rating == ""
+
+
+def test_detection_carries_price_site_and_rating():
+    from price_monitor.models import Detection
+
+    detection = Detection(price=99.99, site="argos.co.uk", rating="4.4 Trustpilot")
+    assert detection.price == 99.99
+    assert detection.site == "argos.co.uk"
+    assert detection.rating == "4.4 Trustpilot"
+
+
+def test_detection_rating_defaults_to_empty_for_an_unrated_retailer():
+    from price_monitor.models import Detection
+
+    assert Detection(price=10.0, site="shop.example").rating == ""
