@@ -63,11 +63,13 @@ class FakeMarketSearcher:
         self.calls: list[str] = []
         self.readings: list[PriceReading] = []
         self.raises: Exception | None = None
+        self.seen_last_price: float | None = None
 
     def price_market(
         self, item: Item, last_price: float | None, timestamp: datetime
     ) -> PriceReading:
         self.calls.append(item.name)
+        self.seen_last_price = last_price
         if self.raises is not None:
             raise self.raises
         reading = PriceReading(
@@ -322,11 +324,13 @@ def test_parser_accepts_once_flag():
     assert str(args.secrets) == "/tmp/s"
 
 
-def _history_row(item: str, when: datetime, status: str = "ok") -> dict[str, str]:
+def _history_row(
+    item: str, when: datetime, status: str = "ok", website: str = "shop.example"
+) -> dict[str, str]:
     return {
         "timestamp": when.strftime("%Y-%m-%d %H:%M:%S"),
         "item": item,
-        "website": "shop.example",
+        "website": website,
         "price": "100.00",
         "currency": "GBP",
         "source_url": "",
@@ -335,13 +339,17 @@ def _history_row(item: str, when: datetime, status: str = "ok") -> dict[str, str
     }
 
 
-def _sheet_with_history(rows: list[dict[str, str]], items: list[str]) -> FakeSheet:
-    return FakeSheet(
-        {
-            "Items": _items([{"item": n, "website": "shop.example"} for n in items]),
-            "Prices": pd.DataFrame(rows),
-        }
+def _sheet_with_history(
+    rows: list[dict[str, str]], items: list[str], market: bool = False
+) -> FakeSheet:
+    items_frame = (
+        _items_with_market(
+            [{"item": n, "website": "shop.example", "market": "yes"} for n in items]
+        )
+        if market
+        else _items([{"item": n, "website": "shop.example"} for n in items])
     )
+    return FakeSheet({"Items": items_frame, "Prices": pd.DataFrame(rows)})
 
 
 def test_update_skips_an_item_checked_within_the_refresh_window(logger):
@@ -623,8 +631,10 @@ class FixedPriceSearcher(FakeSearcher):
         return replace(super().price(item, last_price, timestamp), price=self._fixed)
 
 
-def _price_row(item: str, price: float, when: datetime) -> dict[str, str]:
-    row = _history_row(item, when)
+def _price_row(
+    item: str, price: float, when: datetime, website: str = "shop.example"
+) -> dict[str, str]:
+    row = _history_row(item, when, website=website)
     row["price"] = f"{price:.2f}"
     return row
 
@@ -770,6 +780,7 @@ def test_an_opted_in_item_is_priced_twice(logger, market_searcher):
     _monitor(sheet, searcher, logger, market_searcher).update(force=True)
 
     websites = list(sheet.tabs["Prices"]["website"])
+    assert len(sheet.tabs["Prices"]) == 2
     assert "shop.example" in websites
     assert MARKET_KEY in websites
     assert market_searcher.calls == ["Widget"]
@@ -784,7 +795,55 @@ def test_an_opted_out_item_is_priced_once(logger, market_searcher):
         }
     )
     _monitor(sheet, FakeSearcher(), logger, market_searcher).update(force=True)
+    assert len(sheet.tabs["Prices"]) == 1
     assert market_searcher.calls == []
+
+
+def test_an_opted_in_item_without_a_market_searcher_is_priced_once(logger):
+    """`for_test` allows building a controller with no market searcher at
+    all; an opted-in item must degrade to supplier-only, not raise."""
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [{"item": "Widget", "website": "shop.example", "market": "yes"}]
+            )
+        }
+    )
+    _monitor(sheet, FakeSearcher(), logger, None).update(force=True)
+    assert len(sheet.tabs["Prices"]) == 1
+    assert list(sheet.tabs["Prices"]["website"]) == ["shop.example"]
+
+
+def test_the_sweep_receives_the_markets_last_price_not_the_suppliers(
+    logger, market_searcher
+):
+    """The two lookups keep separate (item, website) series in history, so a
+    crossed key would hand the sweep the supplier's last price — and
+    MarketSearcher would then flag a legitimately cheaper market figure as
+    having suspiciously moved against the wrong baseline."""
+
+    class RecordingSearcher(FakeSearcher):
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen_last_price: float | None = None
+
+        def price(
+            self, item: Item, last_price: float | None, timestamp: datetime
+        ) -> PriceReading:
+            self.seen_last_price = last_price
+            return super().price(item, last_price, timestamp)
+
+    old = datetime.now() - timedelta(hours=7)
+    rows = [
+        _price_row("Widget", 100.0, old),
+        _price_row("Widget", 40.0, old, website=MARKET_KEY),
+    ]
+    sheet = _sheet_with_history(rows, ["Widget"], market=True)
+    searcher = RecordingSearcher()
+    _monitor(sheet, searcher, logger, market_searcher).update(force=True)
+
+    assert searcher.seen_last_price == 100.0
+    assert market_searcher.seen_last_price == 40.0
 
 
 def test_a_failing_sweep_does_not_cost_the_supplier_price(logger, market_searcher):
