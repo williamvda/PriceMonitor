@@ -1,8 +1,10 @@
 """Append-only price history tab.
 
 Owns the long-format Prices tab: one row per item per run, plus the statistics
-derived from it. Sheet values arrive as strings, so prices are coerced on read
-and rendered back as strings on write.
+derived from it. A market sweep is recorded as a second row under the
+``MARKET_KEY`` sentinel website, kept out of ``summarise()`` and reported
+separately by ``market_summary()``. Sheet values arrive as strings, so prices
+are coerced on read and rendered back as strings on write.
 """
 
 import logging
@@ -11,7 +13,7 @@ from datetime import datetime
 import pandas as pd
 from py_utils.logger import get_child_logger
 
-from price_monitor.models import PriceReading, PriceStats
+from price_monitor.models import MARKET_KEY, PriceReading, PriceStats, supplier_domain
 from price_monitor.sheets.protocol import SheetInterface
 
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -23,7 +25,8 @@ TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 # `source_url` and `note` are blank on most readings, so if either sat last
 # a fully-successful run's history could become permanently unreadable.
 # `status` is always a non-empty PriceStatus value, so it anchors the row
-# width. Do not "tidy" it back into the middle.
+# width. Do not "tidy" it back into the middle. `confidence` and `rating` are
+# blank on every supplier row (most rows), so they too must sit before it.
 COLUMNS = [
     "timestamp",
     "item",
@@ -32,10 +35,21 @@ COLUMNS = [
     "currency",
     "source_url",
     "note",
+    "confidence",
+    "rating",
     "status",
 ]
 
 SUMMARY_COLUMNS = ["item", "website", "current", "min", "mean", "last_checked"]
+
+MARKET_SUMMARY_COLUMNS = [
+    "item",
+    "best_price",
+    "best_supplier",
+    "best_supplier_rating",
+    "confidence",
+    "market_checked",
+]
 
 
 class HistoryTab:
@@ -149,6 +163,12 @@ class HistoryTab:
         if frame.empty:
             return pd.DataFrame(columns=SUMMARY_COLUMNS)
 
+        # Market rows are summarised separately: current/min/mean on the Items
+        # tab describe the tracked supplier, not the market.
+        frame = frame[frame["website"] != MARKET_KEY]
+        if frame.empty:
+            return pd.DataFrame(columns=SUMMARY_COLUMNS)
+
         rows = []
         for (item, website), group in frame.groupby(["item", "website"], sort=False):
             ordered = group.sort_values("timestamp", kind="stable")
@@ -173,6 +193,47 @@ class HistoryTab:
             )
         return pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
 
+    def market_summary(self) -> pd.DataFrame:
+        """Latest market sweep per item, for the Items tab's market columns.
+
+        ``best_price`` is the most recent *priced* sweep, while
+        ``market_checked`` moves on every sweep of any status — so a run of
+        failures shows as a moving timestamp beside a stale price rather than
+        looking healthy.
+        """
+        frame = self._typed()
+        if frame.empty:
+            return pd.DataFrame(columns=MARKET_SUMMARY_COLUMNS)
+
+        market = frame[frame["website"] == MARKET_KEY]
+        if market.empty:
+            return pd.DataFrame(columns=MARKET_SUMMARY_COLUMNS)
+
+        rows = []
+        for item, group in market.groupby("item", sort=False):
+            ordered = group.sort_values("timestamp", kind="stable")
+            priced = ordered[ordered["price"].notna()]
+            latest = priced.iloc[-1] if not priced.empty else None
+            rows.append(
+                {
+                    "item": item,
+                    "best_price": float(latest["price"]) if latest is not None else "",
+                    "best_supplier": (
+                        supplier_domain(str(latest["source_url"]))
+                        if latest is not None
+                        else ""
+                    ),
+                    "best_supplier_rating": (
+                        str(latest["rating"]) if latest is not None else ""
+                    ),
+                    "confidence": (
+                        str(latest["confidence"]) if latest is not None else ""
+                    ),
+                    "market_checked": ordered["timestamp"].iloc[-1],
+                }
+            )
+        return pd.DataFrame(rows, columns=MARKET_SUMMARY_COLUMNS)
+
     def _typed(self) -> pd.DataFrame:
         """History with the price column coerced to numbers, blanks becoming NaN."""
         frame = self.read()
@@ -192,5 +253,7 @@ def _to_row(reading: PriceReading) -> dict[str, str]:
         "currency": reading.currency,
         "source_url": reading.source_url,
         "note": reading.note,
+        "confidence": "" if reading.confidence is None else f"{reading.confidence:g}",
+        "rating": reading.rating,
         "status": reading.status.value,
     }

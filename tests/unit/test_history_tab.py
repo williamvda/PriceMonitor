@@ -6,7 +6,7 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from price_monitor.models import PriceReading, PriceStatus
+from price_monitor.models import MARKET_KEY, PriceReading, PriceStatus
 from price_monitor.sheets.history_tab import COLUMNS, HistoryTab
 
 
@@ -40,15 +40,20 @@ def _reading(
     when="2026-08-20 06:00:00",
     status=PriceStatus.OK,
     source_url="https://shop.example/w",
+    website="shop.example",
+    confidence=None,
+    rating="",
 ):
     return PriceReading(
         timestamp=datetime.strptime(when, "%Y-%m-%d %H:%M:%S"),
         item=item,
-        website="shop.example",
+        website=website,
         price=price,
         currency="GBP",
         status=status,
         source_url=source_url,
+        confidence=confidence,
+        rating=rating,
     )
 
 
@@ -61,6 +66,8 @@ def _history(rows: list[dict]) -> pd.DataFrame:
         "currency",
         "source_url",
         "note",
+        "confidence",
+        "rating",
         "status",
     ]
     return pd.DataFrame(rows, columns=columns)
@@ -491,3 +498,124 @@ def test_price_stats_uses_timestamp_order_not_row_order(logger):
 
 def test_price_stats_of_an_empty_history_is_empty(logger):
     assert HistoryTab(FakeSheet(), "Prices", logger).price_stats() == {}
+
+
+def test_confidence_and_rating_round_trip(logger):
+    sheet = FakeSheet()
+    tab = HistoryTab(sheet, "Prices", logger)
+    tab.append(
+        [
+            PriceReading(
+                timestamp=datetime(2026, 9, 11, 6, 0, 0),
+                item="Widget",
+                website=MARKET_KEY,
+                price=100.0,
+                currency="GBP",
+                status=PriceStatus.OK,
+                source_url="https://argos.co.uk/w",
+                note="4 sources, cited",
+                confidence=0.82,
+                rating="4.1 Trustpilot",
+            )
+        ]
+    )
+    frame = tab.read()
+    assert list(frame.columns)[-1] == "status"
+    assert frame["confidence"].iloc[0] == "0.82"
+    assert frame["rating"].iloc[0] == "4.1 Trustpilot"
+
+
+def test_supplier_rows_leave_confidence_and_rating_blank(logger):
+    sheet = FakeSheet()
+    tab = HistoryTab(sheet, "Prices", logger)
+    tab.append([_reading()])
+    frame = tab.read()
+    assert frame["confidence"].iloc[0] == ""
+    assert frame["rating"].iloc[0] == ""
+
+
+def test_summarise_ignores_market_rows(logger):
+    """The Items tab's current/min/mean describe the tracked supplier only."""
+    sheet = FakeSheet()
+    tab = HistoryTab(sheet, "Prices", logger)
+    tab.append(
+        [
+            _reading(item="Widget", website="shop.example", price=200.0),
+            _reading(item="Widget", website=MARKET_KEY, price=100.0),
+        ]
+    )
+    summary = tab.summarise()
+    assert list(summary["website"]) == ["shop.example"]
+    assert summary["current"].iloc[0] == 200.0
+
+
+def test_market_summary_reports_the_latest_sweep(logger):
+    sheet = FakeSheet()
+    tab = HistoryTab(sheet, "Prices", logger)
+    tab.append(
+        [
+            _reading(
+                item="Widget",
+                website=MARKET_KEY,
+                price=120.0,
+                when="2026-09-11 06:00:00",
+                source_url="https://www.very.co.uk/w",
+                confidence=0.7,
+                rating="4.0 Trustpilot",
+            ),
+            _reading(
+                item="Widget",
+                website=MARKET_KEY,
+                price=100.0,
+                when="2026-09-11 12:00:00",
+                source_url="https://www.argos.co.uk/w",
+                confidence=0.9,
+                rating="4.4 Trustpilot",
+            ),
+        ]
+    )
+    row = tab.market_summary().iloc[0]
+    assert row["item"] == "Widget"
+    assert row["best_price"] == 100.0
+    assert row["best_supplier"] == "argos.co.uk"
+    assert row["best_supplier_rating"] == "4.4 Trustpilot"
+    assert row["confidence"] == "0.9"
+
+
+def test_market_summary_is_empty_without_market_rows(logger):
+    sheet = FakeSheet()
+    tab = HistoryTab(sheet, "Prices", logger)
+    tab.append([_reading(item="Widget", website="shop.example", price=100.0)])
+    assert tab.market_summary().empty
+
+
+def test_market_checked_moves_even_when_a_sweep_finds_nothing(logger):
+    """A run of failed sweeps must not look like a healthy stale price."""
+    sheet = FakeSheet()
+    tab = HistoryTab(sheet, "Prices", logger)
+    tab.append(
+        [
+            _reading(
+                item="Widget",
+                website=MARKET_KEY,
+                price=100.0,
+                when="2026-09-11 06:00:00",
+                source_url="https://www.argos.co.uk/w",
+            )
+        ]
+    )
+    tab.append(
+        [
+            PriceReading(
+                timestamp=datetime(2026, 9, 12, 6, 0, 0),
+                item="Widget",
+                website=MARKET_KEY,
+                price=None,
+                currency="GBP",
+                status=PriceStatus.NOT_FOUND,
+            )
+        ]
+    )
+    row = tab.market_summary().iloc[0]
+    assert row["best_price"] == 100.0
+    assert row["market_checked"] == "2026-09-12 06:00:00"
