@@ -4,7 +4,7 @@ from datetime import datetime
 
 from price_monitor.app_config import PriceCtrl
 from price_monitor.models import Item, PriceStatus
-from price_monitor.search.validation import validate
+from price_monitor.search.validation import normalise_price, validate
 
 NOW = datetime(2026, 8, 20, 6, 0, 0)
 ITEM = Item(name="Widget", website="shop.example")
@@ -204,3 +204,44 @@ def test_vat_adjustment_can_push_a_price_past_the_plausibility_ceiling():
         _payload(price=299.99, vat_included=False), ITEM, NOW, ctrl, None, []
     )
     assert reading.status == PriceStatus.REJECTED
+
+
+def _normalise(**overrides):
+    payload = {"price": 100.0, "currency": "GBP"}
+    payload.update(overrides)
+    return normalise_price(payload, CTRL)
+
+
+def test_normalise_accepts_a_clean_price():
+    price, failure, note = _normalise()
+    assert (price, failure, note) == (100.0, None, "")
+
+
+def test_normalise_rejects_a_foreign_currency():
+    price, failure, note = _normalise(currency="USD")
+    assert price is None
+    assert failure == PriceStatus.WRONG_CURRENCY
+    assert note == "reported USD"
+
+
+def test_normalise_rejects_a_boolean_price():
+    assert _normalise(price=True)[1] == PriceStatus.REJECTED
+
+
+def test_normalise_rejects_a_non_numeric_price():
+    assert _normalise(price="cheap")[1] == PriceStatus.REJECTED
+
+
+def test_normalise_rejects_an_implausible_price():
+    assert _normalise(price=CTRL.max_plausible_price + 1)[1] == PriceStatus.REJECTED
+
+
+def test_normalise_adds_vat_when_the_price_excludes_it():
+    price, failure, note = _normalise(price=100.0, vat_included=False)
+    assert price == 120.0
+    assert failure is None
+    assert note == "ex-VAT 100 +20% VAT"
+
+
+def test_normalise_assumes_vat_is_included_when_unstated():
+    assert _normalise(price=100.0)[0] == 100.0
