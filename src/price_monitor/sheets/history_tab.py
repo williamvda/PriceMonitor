@@ -253,7 +253,9 @@ def _to_row(reading: PriceReading) -> dict[str, str]:
         "currency": reading.currency,
         "source_url": reading.source_url,
         "note": reading.note,
-        "confidence": "" if reading.confidence is None else f"{reading.confidence:g}",
+        "confidence": (
+            "" if reading.confidence is None else f"{reading.confidence:.2f}"
+        ),
         "rating": reading.rating,
         "status": reading.status.value,
     }

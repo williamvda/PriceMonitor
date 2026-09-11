@@ -24,6 +24,11 @@ from price_monitor.search.prompts import market_format_prompt, market_prompt
 from price_monitor.search.searcher import FORMAT_PROVIDER, retrying
 from price_monitor.search.validation import normalise_price
 
+# Ratings are reported out of 5. A value outside [0, MAX_RATING] is not a
+# trustworthy score — e.g. the model reported one out of 10 — so it is
+# treated as unknown rather than trusted.
+MAX_RATING = 5.0
+
 
 class MarketSearcher:
     """Prices a single :class:`Item` across UK retailers rather than at one."""
@@ -39,6 +44,12 @@ class MarketSearcher:
         self.logger = get_child_logger(logger, __class__.__name__)
         self._ctrl = ctrl
         search_provider = config.provider if config.grounded else FORMAT_PROVIDER
+        if not config.grounded:
+            self.logger.warning(
+                "Grounding disabled: prices come from model recall, and "
+                "source_url is unverified. The sourcing factor is capped for "
+                "every sweep."
+            )
         self._search_client = search_client or LLMClient(
             provider=search_provider,
             api_key=config.api_key,
@@ -109,16 +120,24 @@ class MarketSearcher:
         last_price: float | None,
         urls: list[str],
     ) -> PriceReading:
-        candidates = self._candidates(payload)
-        if not candidates:
+        pairs = self._candidates(payload)
+        if not pairs:
             note = str(payload.get("note") or "").strip() or "no usable candidates"
             return self._failed(item, timestamp, PriceStatus.NOT_FOUND, note)
 
+        candidates = [candidate for candidate, _ in pairs]
         winner = min(candidates, key=lambda c: c.price)
+        # `is`, not `==`: two candidates can share identical field values, and
+        # only the object actually chosen as winner carries the right note.
+        winner_vat_note = next(n for c, n in pairs if c is winner)
         value, reason = score(candidates, urls)
 
         status = PriceStatus.OK
         note = reason
+        if winner_vat_note:
+            # Only the winner's note matters — a discarded candidate's VAT
+            # adjustment never reaches the sheet, same as its price.
+            note = f"{note}; {winner_vat_note}"
         if last_price is not None and last_price > 0:
             move = abs(winner.price - last_price) / last_price
             if move > self._ctrl.suspect_threshold:
@@ -138,9 +157,15 @@ class MarketSearcher:
             rating=winner.rating_label,
         )
 
-    def _candidates(self, payload: dict) -> list[Candidate]:
-        """Validated, in-stock, above-floor candidates, VAT-normalised."""
-        candidates: list[Candidate] = []
+    def _candidates(self, payload: dict) -> list[tuple[Candidate, str]]:
+        """Validated, in-stock, above-floor candidates, VAT-normalised.
+
+        Each candidate is paired with the VAT-adjustment note
+        :func:`normalise_price` returned for it (blank when its price needed
+        no adjustment), so the winner's note can be preserved without
+        carrying VAT fields on :class:`Candidate` itself.
+        """
+        candidates: list[tuple[Candidate, str]] = []
         raw_candidates = payload.get("candidates")
         if not isinstance(raw_candidates, list):
             return candidates
@@ -148,13 +173,20 @@ class MarketSearcher:
             if not isinstance(raw, dict):
                 continue
 
-            price, failure, _ = normalise_price(raw, self._ctrl)
+            price, failure, vat_note = normalise_price(raw, self._ctrl)
             if failure is not None or price is None:
                 continue
             if raw.get("in_stock", True) is False:
                 continue
 
             rating = _as_float(raw.get("rating"))
+            if rating is not None and not (0.0 <= rating <= MAX_RATING):
+                # Ratings are out of 5. A value outside that range (a rating
+                # out of 10, or a review count mistaken for a score) is not a
+                # trustworthy 5-point score, so it is treated as unknown
+                # rather than let it sail past the floor and inflate
+                # reputation to 1.0.
+                rating = None
             count = _as_int(raw.get("rating_count"))
             candidate = Candidate(
                 supplier=str(raw.get("supplier") or "").strip(),
@@ -175,7 +207,7 @@ class MarketSearcher:
                     f"on {candidate.rating_count} reviews"
                 )
                 continue
-            candidates.append(candidate)
+            candidates.append((candidate, vat_note))
         return candidates
 
     def _failed(

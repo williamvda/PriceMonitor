@@ -525,6 +525,23 @@ def test_confidence_and_rating_round_trip(logger):
     assert frame["rating"].iloc[0] == "4.1 Trustpilot"
 
 
+def test_confidence_renders_with_two_decimal_places(logger):
+    """The spec documents this column as 0.00-1.00, so a perfect score must
+    render as "1.00" and 0.90 must not collapse to "0.9" — both would
+    otherwise misalign the column against the rest of its values."""
+    sheet = FakeSheet()
+    tab = HistoryTab(sheet, "Prices", logger)
+    tab.append(
+        [
+            _reading(website=MARKET_KEY, confidence=1.0),
+            _reading(website=MARKET_KEY, confidence=0.9),
+            _reading(website=MARKET_KEY, confidence=0.0),
+        ]
+    )
+    frame = tab.read()
+    assert list(frame["confidence"]) == ["1.00", "0.90", "0.00"]
+
+
 def test_supplier_rows_leave_confidence_and_rating_blank(logger):
     sheet = FakeSheet()
     tab = HistoryTab(sheet, "Prices", logger)
@@ -579,7 +596,7 @@ def test_market_summary_reports_the_latest_sweep(logger):
     assert row["best_price"] == 100.0
     assert row["best_supplier"] == "argos.co.uk"
     assert row["best_supplier_rating"] == "4.4 Trustpilot"
-    assert row["confidence"] == "0.9"
+    assert row["confidence"] == "0.90"
 
 
 def test_market_summary_is_empty_without_market_rows(logger):

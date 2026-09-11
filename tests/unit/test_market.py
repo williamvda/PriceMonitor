@@ -121,6 +121,24 @@ def test_a_badly_rated_retailer_is_dropped_by_the_floor(logger):
     assert reading.price == 100.0
 
 
+def test_an_out_of_range_rating_is_treated_as_unrated(logger):
+    """Ratings are out of 5. A model reporting 45.0 (out of 10, or a review
+    count mistaken for a score) must not sail past the floor and score a
+    full 1.0 on reputation — it is treated as unknown instead."""
+    searcher = _searcher(
+        logger,
+        [
+            _candidate(
+                price=100.0, rating=45.0, rating_count=900, url="https://a.co.uk/w"
+            ),
+        ],
+    )
+    reading = searcher.price_market(ITEM, None, NOW)
+    assert reading.status == PriceStatus.OK
+    assert reading.price == 100.0
+    assert reading.rating == ""
+
+
 def test_a_bad_rating_on_too_few_reviews_does_not_trigger_the_floor(logger):
     """2.1 from 12 reviews is noise, not evidence — the candidate survives."""
     searcher = _searcher(
@@ -172,6 +190,36 @@ def test_an_ex_vat_candidate_is_grossed_up_before_ranking(logger):
         ],
     )
     assert searcher.price_market(ITEM, None, NOW).price == 100.0
+
+
+def test_the_winning_candidates_vat_adjustment_is_recorded_in_the_note(logger):
+    """The winner's own VAT top-up must be visible in the note, appended
+    after the confidence reason — a market row that adjusted for VAT must
+    not look identical to one that did not."""
+    searcher = _searcher(
+        logger,
+        [_candidate(price=90.0, vat_included=False, url="https://a.co.uk/w")],
+    )
+    reading = searcher.price_market(ITEM, None, NOW)
+    assert reading.price == 108.0
+    # Appended after the confidence reason, in the same "; "-joined style as
+    # the suspect-movement text.
+    assert reading.note.endswith("; ex-VAT 90 +20% VAT")
+
+
+def test_a_discarded_candidates_vat_adjustment_is_not_recorded(logger):
+    """Only the winner's note matters; a cheaper VAT-adjusted candidate that
+    lost the race leaves no trace of its own adjustment."""
+    searcher = _searcher(
+        logger,
+        [
+            _candidate(price=200.0, vat_included=False, url="https://a.co.uk/w"),
+            _candidate(price=100.0, vat_included=True, url="https://b.co.uk/w"),
+        ],
+    )
+    reading = searcher.price_market(ITEM, None, NOW)
+    assert reading.price == 100.0
+    assert "ex-VAT" not in reading.note
 
 
 def test_no_candidates_is_not_found(logger):
