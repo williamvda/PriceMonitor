@@ -2,6 +2,8 @@
 
 from datetime import datetime
 
+import pytest
+
 from price_monitor.models import Item, PriceReading, PriceStats, PriceStatus
 
 
@@ -98,3 +100,45 @@ def test_a_wider_step_puts_the_same_fall_in_a_shallower_band():
     stats = _stats(mean=100.0, last=99.0)
     assert stats.new_drop_band(89.0, 0.05) == 3
     assert stats.new_drop_band(89.0, 0.10) == 2
+
+
+def test_item_defaults_to_not_market_tracked():
+    assert Item(name="Widget", website="shop.example").market is False
+
+
+def test_item_can_opt_into_market_tracking():
+    assert Item(name="Widget", website="shop.example", market=True).market is True
+
+
+def test_market_key_is_the_sentinel_website():
+    from price_monitor.models import MARKET_KEY
+
+    assert MARKET_KEY == "market"
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://www.argos.co.uk/product/123", "argos.co.uk"),
+        ("https://argos.co.uk/product/123", "argos.co.uk"),
+        ("http://SHOP.Example/x", "shop.example"),
+        ("", ""),
+    ],
+)
+def test_supplier_domain_strips_scheme_and_www(url, expected):
+    from price_monitor.models import supplier_domain
+
+    assert supplier_domain(url) == expected
+
+
+def test_reading_defaults_carry_no_confidence_or_rating():
+    reading = PriceReading(
+        timestamp=datetime(2026, 9, 11, 6, 0, 0),
+        item="Widget",
+        website="shop.example",
+        price=10.0,
+        currency="GBP",
+        status=PriceStatus.OK,
+    )
+    assert reading.confidence is None
+    assert reading.rating == ""
