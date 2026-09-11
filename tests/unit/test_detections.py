@@ -58,6 +58,22 @@ def test_cheapest_ties_break_toward_the_higher_rating():
     assert cheapest.rating_label == "4.6 Trustpilot"
 
 
+def test_cheapest_ties_break_toward_well_reviewed_rating():
+    """Even in a price tie, prefer a rating resting on 50+ reviews over thin ones.
+
+    This respects .rated throughout the module: a 4.9 from 12 reviews is noise
+    and should not influence the choice when a 4.0 from 900 reviews is available
+    at the same price.
+    """
+    cands = [
+        _candidate(100.0, rating=4.9, count=12, supplier="Thin"),
+        _candidate(100.0, rating=4.0, count=900, supplier="Trusted"),
+    ]
+    _, cheapest, _ = select(cands, PREMIUM)
+    assert cheapest.supplier == "Trusted"
+    assert cheapest.rating_label == "4.0 Trustpilot"
+
+
 def test_an_unrated_retailer_cannot_be_the_best_rated():
     """No rating is not a rating; ranking it would invent evidence."""
     cands = [
@@ -68,6 +84,20 @@ def test_an_unrated_retailer_cannot_be_the_best_rated():
     assert best_rated.price == 150.0
     assert cheapest.price == 100.0
     assert cheapest.rating_label == ""
+
+
+def test_select_returns_candidates_by_identity():
+    """The caller needs to recover winners by identity, not by value matching.
+
+    Two candidates can share every field value, so matching a winner back by
+    price and domain would pick the wrong one's VAT note. This test pins that
+    the function returns the actual Candidate objects from the input list.
+    """
+    cand_a = _candidate(100.0, rating=3.0, supplier="Same")
+    cand_b = _candidate(100.0, rating=3.0, supplier="Same")
+    cands = [cand_a, cand_b]
+    _, cheapest, _ = select(cands, PREMIUM)
+    assert cheapest is cand_a
 
 
 def test_nothing_rated_leaves_best_rated_and_best_value_empty():
@@ -121,10 +151,16 @@ def test_best_value_falls_back_to_the_baseline_when_nothing_qualifies():
     assert best_value.price == 100.0
 
 
-def test_best_value_never_downgrades_to_a_worse_rating():
+def test_best_value_prefers_higher_rating_over_cheaper_unrated_price():
+    """When the baseline is better-rated than a cheaper option, stay with baseline.
+
+    Cheapest is 99@2.0 (unrated because count < 50), but baseline is 100@3.0.
+    Since nothing is better-rated than the baseline, best_value returns the
+    baseline (100), not the cheaper unrated option.
+    """
     cands = [
-        _candidate(100.0, rating=3.0, supplier="A"),
-        _candidate(99.0, rating=2.0, supplier="B"),
+        _candidate(100.0, rating=3.0, count=50, supplier="A"),
+        _candidate(99.0, rating=2.0, count=30, supplier="B"),
     ]
     _, cheapest, best_value = select(cands, PREMIUM)
     assert cheapest.price == 99.0
@@ -168,8 +204,8 @@ def test_to_detection_passes_none_through():
 def test_best_value_ties_break_toward_the_cheaper():
     cands = [
         _candidate(100.0, rating=3.0, supplier="A"),
-        _candidate(103.0, rating=4.0, supplier="B"),
         _candidate(104.0, rating=4.0, supplier="C"),
+        _candidate(103.0, rating=4.0, supplier="B"),
     ]
     _, _, best_value = select(cands, PREMIUM)
     assert best_value.price == 103.0

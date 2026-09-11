@@ -31,7 +31,7 @@ def select(
     # Tie-breaks use the other dimension: best-rated prefers the cheaper, and
     # cheapest prefers the better-rated.
     best_rated = max(rated, key=lambda c: (c.rating, -c.price)) if rated else None
-    cheapest = min(candidates, key=lambda c: (c.price, -(c.rating or 0.0)))
+    cheapest = min(candidates, key=lambda c: (c.price, -(c.rating if c.rated else 0.0)))
     return best_rated, cheapest, _best_value(rated, premium_pct)
 
 
