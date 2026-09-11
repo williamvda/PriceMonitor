@@ -252,7 +252,10 @@ status leaves all three detections blank.
 **The Items tab migrates itself.** `ItemsTab.read()` looks up the `item`
 column by name and ignores the stale `website` and `market` columns
 entirely; the first summary write rewrites the whole tab in the new shape.
-Your item list survives untouched — no manual step needed.
+Your item list survives untouched — no manual step needed. This self-heal
+only happens on a run that actually sweeps something, though: if the
+existing history is still fresher than `refresh_rate_h`, `update()` returns
+early and the Items tab keeps its old shape until that interval has passed.
 
 **You must delete the Prices tab yourself before the first run.**
 PriceMonitor recreates it on first append, but it will not drop a history
@@ -262,7 +265,9 @@ you can trust with the next one. The old rows measure a different quantity
 (a per-supplier price, not a UK-wide cheapest) and left in place they would
 be reindexed under the new columns with every price blank — harmless to the
 statistics, since a blank `cheapest_price` is excluded from them, but
-confusing to read.
+confusing to read. That said, the tab surviving does not mean its old data
+does: the first `append()` rewrites the columns outright, so the old
+`price`, `website`, and `source_url` values are gone from that point on.
 
 ## Installation
 
