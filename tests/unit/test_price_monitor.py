@@ -13,7 +13,7 @@ import pytest
 
 import price_monitor.price_monitor as price_monitor_module
 from price_monitor.app_config import PriceCtrl
-from price_monitor.models import Item, PriceReading, PriceStatus
+from price_monitor.models import MARKET_KEY, Item, PriceReading, PriceStatus
 from price_monitor.price_monitor import PriceMonitor, args_parser
 
 
@@ -54,19 +54,65 @@ class FakeSearcher:
         )
 
 
+class FakeMarketSearcher:
+    """Returns a canned market reading, or raises if told to."""
+
+    def __init__(self, price: float = 100.0, confidence: float = 0.9) -> None:
+        self.price = price
+        self.confidence = confidence
+        self.calls: list[str] = []
+        self.readings: list[PriceReading] = []
+        self.raises: Exception | None = None
+
+    def price_market(
+        self, item: Item, last_price: float | None, timestamp: datetime
+    ) -> PriceReading:
+        self.calls.append(item.name)
+        if self.raises is not None:
+            raise self.raises
+        reading = PriceReading(
+            timestamp=timestamp,
+            item=item.name,
+            website=MARKET_KEY,
+            price=self.price,
+            currency="GBP",
+            status=PriceStatus.OK,
+            source_url="https://argos.co.uk/w",
+            note="3 sources, cited, rated 4.4",
+            confidence=self.confidence,
+            rating="4.4 Trustpilot",
+        )
+        self.readings.append(reading)
+        return reading
+
+
 @pytest.fixture
 def logger() -> logging.Logger:
     return logging.getLogger("test")
 
 
+@pytest.fixture
+def market_searcher() -> FakeMarketSearcher:
+    return FakeMarketSearcher()
+
+
 def _monitor(
-    sheet: FakeSheet, searcher: FakeSearcher, logger: logging.Logger
+    sheet: FakeSheet,
+    searcher: FakeSearcher,
+    logger: logging.Logger,
+    market_searcher: FakeMarketSearcher | None = None,
 ) -> PriceMonitor:
-    return PriceMonitor.for_test(gsheet=sheet, searcher=searcher, logger=logger)
+    return PriceMonitor.for_test(
+        gsheet=sheet, searcher=searcher, logger=logger, market_searcher=market_searcher
+    )
 
 
 def _items(rows: list[dict[str, str]]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["item", "website"])
+
+
+def _items_with_market(rows: list[dict[str, str]]) -> pd.DataFrame:
+    return pd.DataFrame(rows, columns=["item", "website", "market"])
 
 
 def test_update_prices_every_item(logger):
@@ -707,3 +753,53 @@ def test_a_sharp_first_crossing_is_not_worded_as_still_falling(logger):
     monitor.update()
 
     assert "still falling" not in notifier.messages[-1]
+
+
+# --- market sweep ------------------------------------------------------------
+
+
+def test_an_opted_in_item_is_priced_twice(logger, market_searcher):
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [{"item": "Widget", "website": "shop.example", "market": "yes"}]
+            )
+        }
+    )
+    searcher = FakeSearcher()
+    _monitor(sheet, searcher, logger, market_searcher).update(force=True)
+
+    websites = list(sheet.tabs["Prices"]["website"])
+    assert "shop.example" in websites
+    assert MARKET_KEY in websites
+    assert market_searcher.calls == ["Widget"]
+
+
+def test_an_opted_out_item_is_priced_once(logger, market_searcher):
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [{"item": "Widget", "website": "shop.example", "market": ""}]
+            )
+        }
+    )
+    _monitor(sheet, FakeSearcher(), logger, market_searcher).update(force=True)
+    assert market_searcher.calls == []
+
+
+def test_a_failing_sweep_does_not_cost_the_supplier_price(logger, market_searcher):
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [{"item": "Widget", "website": "shop.example", "market": "yes"}]
+            )
+        }
+    )
+    market_searcher.raises = RuntimeError("sweep exploded")
+    _monitor(sheet, FakeSearcher(), logger, market_searcher).update(force=True)
+
+    prices = sheet.tabs["Prices"]
+    supplier = prices[prices["website"] == "shop.example"]
+    swept = prices[prices["website"] == MARKET_KEY]
+    assert supplier.iloc[0]["status"] == PriceStatus.OK.value
+    assert swept.iloc[0]["status"] == PriceStatus.ERROR.value

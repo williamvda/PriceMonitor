@@ -21,7 +21,7 @@ from py_utils.logger import consoleLogger, get_child_logger
 
 from price_monitor import __version__
 from price_monitor.app_config import PriceCtrl, load_price_config
-from price_monitor.models import Item, PriceReading, PriceStats, PriceStatus
+from price_monitor.models import MARKET_KEY, Item, PriceReading, PriceStats, PriceStatus
 from price_monitor.msgserver_client.msg_forwarder import (
     MsgNotifier,
     attach_msg_server,
@@ -32,6 +32,7 @@ from price_monitor.msgserver_client.msg_forwarder import (
     format_price_drop,
     format_startup_message,
 )
+from price_monitor.search.market import MarketSearcher
 from price_monitor.search.searcher import PriceSearcher
 from price_monitor.sheets.history_tab import HistoryTab
 from price_monitor.sheets.items_tab import ItemsTab
@@ -75,6 +76,9 @@ class PriceMonitor:
         self._init_parts(
             gsheet=gsheet,
             searcher=PriceSearcher(config.llm_config, config.price_ctrl, logger),
+            market_searcher=MarketSearcher(
+                config.llm_config, config.price_ctrl, logger
+            ),
         )
 
     @classmethod
@@ -83,21 +87,28 @@ class PriceMonitor:
         gsheet: MonitoredSheetInterface,
         searcher: PriceSearcher,
         logger: logging.Logger,
+        market_searcher: MarketSearcher | None = None,
     ) -> "PriceMonitor":
         """Build a controller around fakes, skipping config and network setup."""
         monitor = cls.__new__(cls)
         monitor.logger = get_child_logger(logger, cls.__name__)
         monitor.ctrl = PriceCtrl(request_delay_s=0.0)
-        monitor._init_parts(gsheet=gsheet, searcher=searcher)
+        monitor._init_parts(
+            gsheet=gsheet, searcher=searcher, market_searcher=market_searcher
+        )
         monitor.root_logger = logger
         monitor.msg_client = None
         monitor.notifier = MsgNotifier(client=None, logger=monitor.logger)
         return monitor
 
     def _init_parts(
-        self, gsheet: MonitoredSheetInterface, searcher: PriceSearcher
+        self,
+        gsheet: MonitoredSheetInterface,
+        searcher: PriceSearcher,
+        market_searcher: MarketSearcher | None = None,
     ) -> None:
         self._searcher = searcher
+        self._market_searcher = market_searcher
         self.items_tab = ItemsTab(gsheet, self.ctrl.items_sheet, self.logger)
         self.history = HistoryTab(gsheet, self.ctrl.history_sheet, self.logger)
         self._gsheet = gsheet
@@ -210,6 +221,12 @@ class PriceMonitor:
             readings.append(
                 self._price_one(item, last_prices.get((item.name, item.website)))
             )
+            if item.market and self._market_searcher is not None:
+                if self.ctrl.request_delay_s:
+                    self.stop_event.wait(self.ctrl.request_delay_s)
+                readings.append(
+                    self._market_one(item, last_prices.get((item.name, MARKET_KEY)))
+                )
         return readings
 
     def _price_one(self, item: Item, last_price: float | None) -> PriceReading:
@@ -223,6 +240,23 @@ class PriceMonitor:
                 timestamp=timestamp,
                 item=item.name,
                 website=item.website,
+                price=None,
+                currency=self.ctrl.currency,
+                status=PriceStatus.ERROR,
+                note=str(exc),
+            )
+
+    def _market_one(self, item: Item, last_price: float | None) -> PriceReading:
+        timestamp = datetime.now().replace(microsecond=0)
+        try:
+            return self._market_searcher.price_market(item, last_price, timestamp)
+        except Exception as exc:
+            # A failed sweep must never cost the item its supplier price.
+            self.logger.warning(f"Market sweep for '{item.name}' failed: {exc}")
+            return PriceReading(
+                timestamp=timestamp,
+                item=item.name,
+                website=MARKET_KEY,
                 price=None,
                 currency=self.ctrl.currency,
                 status=PriceStatus.ERROR,
