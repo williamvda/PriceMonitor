@@ -279,13 +279,36 @@ higher scores: review-farmed dropshippers routinely sit at 4.7–4.9, so treatin
 a very high rating as strong evidence would favour exactly the retailers this
 is meant to catch. 4.0 and 4.9 are worth the same here.
 
-Worked examples:
+Worked examples, computed from the factors above:
 
-- Four cited suppliers, prices clustered, winner rated 4.4 → ~0.95
-- Four cited suppliers, prices clustered, winner unrated → ~0.76
-- One cited supplier rated 4.2 → 0.33
-- Four cited suppliers, winner 55% under the median of the others → ~0.5
-- Four cited suppliers, winner rated 3.2 on 900 reviews → ~0.44
+| Sweep | Score |
+| --- | --- |
+| Four cited suppliers, prices clustered, winner rated 4.4 | 1.00 |
+| Four cited suppliers, prices clustered, winner unrated | 0.80 |
+| Four cited suppliers, clustered, winner rated 3.2 on 900 reviews | 0.44 |
+| Four cited suppliers, winner 30% under the others' median, rated 4.4 | 0.75 |
+| Four cited suppliers, winner 55% under the others' median, rated 4.4 | 0.12 |
+| Two cited suppliers, clustered, winner unrated | 0.53 |
+| One cited supplier, rated 4.2 | 0.33 |
+
+### What the default threshold implies
+
+Corroboration alone caps a single-source sweep at **0.33**, whatever else is
+true of it — a perfect price from a perfectly-rated retailer still scores 0.33
+if only one retailer stocks the item. With `market_min_confidence` at 0.5 that
+means:
+
+- **One retailer found → a drop is never announced.** The row is still written,
+  `best_price` still updates on the Items tab, and the suppressed drop is
+  logged. Only the notification is withheld.
+- **Two retailers found → announced only if nothing else is wrong** (0.53 for a
+  clustered, cited, unrated pair; less if any factor dips).
+- **Three or more → the other three factors decide.**
+
+This is the intended reading of "best price across all UK suppliers": one shop
+is not a market. But it is a real behavioural consequence for genuinely
+niche items, and the fix if it bites is to lower `market_min_confidence`
+to ~0.3 rather than to change the scorer.
 
 The outlier factor is neutral rather than punishing at `n = 1` because there is
 nothing to compare against; corroboration already carries that penalty, and
