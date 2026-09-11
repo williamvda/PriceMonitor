@@ -198,14 +198,18 @@ class PriceMonitor:
             if not stats.new_drop_band(reading.cheapest.price, self.ctrl.drop_step):
                 continue
             if (
-                reading.confidence is not None
-                and reading.confidence < self.ctrl.min_confidence
+                reading.confidence is None
+                or reading.confidence < self.ctrl.min_confidence
             ):
                 # Logged, not silent: an item that is gated every run is a
                 # prompt problem worth seeing, not a quiet nothing.
+                confidence = (
+                    "none"
+                    if reading.confidence is None
+                    else f"{reading.confidence:.2f}"
+                )
                 self.logger.info(
-                    f"Drop for '{reading.item}' suppressed: "
-                    f"confidence {reading.confidence:.2f}"
+                    f"Drop for '{reading.item}' suppressed: confidence {confidence}"
                 )
                 continue
             self.notifier.notify(

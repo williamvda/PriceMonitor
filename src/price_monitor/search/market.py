@@ -130,6 +130,15 @@ class MarketSearcher:
         rated_pick, cheapest_pick, value_pick = select(
             candidates, self._ctrl.rating_premium_pct
         )
+        if cheapest_pick is None:
+            # select() only returns None across the board when `candidates`
+            # is empty, which cannot happen here (`pairs` was just checked
+            # above) — but `Candidate | None` doesn't say so, and this module
+            # promises nothing raises out of price_market(), so the guarantee
+            # is made explicit rather than assumed.
+            return self._failed(
+                item, timestamp, PriceStatus.NOT_FOUND, "no usable candidates"
+            )
         # `is`, not `==`: two candidates can share every field value, and only
         # the object actually chosen carries the right VAT note.
         winner_vat_note = next(n for c, n in pairs if c is cheapest_pick)

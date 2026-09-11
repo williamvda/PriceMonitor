@@ -38,7 +38,7 @@ class FakeSheet:
 class FakeMarketSearcher:
     """Returns a canned sweep, or raises if told to."""
 
-    def __init__(self, price: float = 100.0, confidence: float = 0.9) -> None:
+    def __init__(self, price: float = 100.0, confidence: float | None = 0.9) -> None:
         self.price = price
         self.confidence = confidence
         self.swept: list[str] = []
@@ -585,15 +585,37 @@ def test_a_sharp_first_crossing_is_not_worded_as_still_falling(logger):
 # --- confidence gate ---------------------------------------------------------
 
 
-def test_a_low_confidence_drop_is_recorded_but_not_announced(logger):
+def test_a_low_confidence_drop_is_recorded_but_not_announced(logger, caplog):
     sheet = _sheet_with_history(_seed("Widget", [200.0, 200.0, 200.0]), ["Widget"])
     monitor, notifier = _monitor_with_notifier(
         sheet, FakeMarketSearcher(price=100.0, confidence=0.4), logger
     )
-    monitor.update(force=True)
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        monitor.update(force=True)
 
     prices = sheet.tabs["Prices"]
     assert "100.00" in list(prices["cheapest_price"])
+    assert _drops(notifier) == []
+    # The suppression must be logged, not silent: an item gated on every run
+    # is a prompt problem worth seeing, and a refactor that deleted the
+    # logging call would otherwise leave this test green.
+    assert any(
+        "Widget" in record.message and "0.40" in record.message
+        for record in caplog.records
+    )
+
+
+def test_a_drop_with_no_confidence_is_not_announced(logger):
+    """Unreachable via `_rank` today (it always sets a confidence), but the
+    gate must not rely on that: a `cheapest` with no `confidence` must be
+    suppressed, not passed on to a formatter that would raise on `None`."""
+    sheet = _sheet_with_history(_seed("Widget", [200.0, 200.0, 200.0]), ["Widget"])
+    monitor, notifier = _monitor_with_notifier(
+        sheet, FakeMarketSearcher(price=100.0, confidence=None), logger
+    )
+    monitor.update(force=True)
+
     assert _drops(notifier) == []
 
 
