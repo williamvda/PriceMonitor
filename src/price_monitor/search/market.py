@@ -141,7 +141,10 @@ class MarketSearcher:
     def _candidates(self, payload: dict) -> list[Candidate]:
         """Validated, in-stock, above-floor candidates, VAT-normalised."""
         candidates: list[Candidate] = []
-        for raw in payload.get("candidates") or []:
+        raw_candidates = payload.get("candidates")
+        if not isinstance(raw_candidates, list):
+            return candidates
+        for raw in raw_candidates:
             if not isinstance(raw, dict):
                 continue
 

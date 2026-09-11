@@ -188,6 +188,31 @@ def test_all_candidates_out_of_stock_is_not_found(logger):
     assert searcher.price_market(ITEM, None, NOW).status == PriceStatus.NOT_FOUND
 
 
+def test_a_non_list_candidates_field_is_not_found(logger):
+    """A count where a list was expected — shape-collapse an LLM can produce."""
+    searcher = _searcher(logger, 1)
+    assert searcher.price_market(ITEM, None, NOW).status == PriceStatus.NOT_FOUND
+
+
+def test_a_non_dict_entry_in_candidates_is_ignored(logger):
+    searcher = _searcher(logger, ["not a dict", _candidate(price=100.0)])
+    reading = searcher.price_market(ITEM, None, NOW)
+    assert reading.status == PriceStatus.OK
+    assert reading.price == 100.0
+
+
+def test_a_boolean_rating_is_treated_as_unrated_not_as_one(logger):
+    """True as a rating must not parse as 1.0 and trip the floor."""
+    searcher = _searcher(
+        logger,
+        [_candidate(price=100.0, rating=True, rating_count=900)],
+    )
+    reading = searcher.price_market(ITEM, None, NOW)
+    assert reading.status == PriceStatus.OK
+    assert reading.price == 100.0
+    assert reading.rating == ""
+
+
 def test_a_big_move_from_the_last_market_price_is_suspect(logger):
     searcher = _searcher(logger, [_candidate(price=100.0)])
     reading = searcher.price_market(ITEM, 400.0, NOW)
