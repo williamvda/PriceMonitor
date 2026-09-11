@@ -1,8 +1,9 @@
 """User-facing Items tab.
 
-Columns A-B (``item``, ``website``) are owned by the user; the summary columns
-after them are rewritten on every run. Malformed rows are skipped rather than
-allowed to reach the LLM.
+Columns A-C (``item``, ``website``, ``market``) are owned by the user; the
+summary columns after them are rewritten on every run, split between the
+per-supplier statistics and the opt-in UK-wide market sweep. Malformed rows
+are skipped rather than allowed to reach the LLM.
 """
 
 import logging
@@ -10,11 +11,41 @@ import logging
 import pandas as pd
 from py_utils.logger import get_child_logger
 
-from price_monitor.models import Item
+from price_monitor.models import MARKET_KEY, Item
 from price_monitor.sheets.protocol import SheetInterface
 
-COLUMNS = ["item", "website", "current", "min", "mean", "last_checked"]
+# `market_checked` MUST stay last, for the same reason `status` anchors the
+# history tab: the Sheets API omits trailing empty cells from each row, and
+# when every row in a read comes back short, pandas raises inside
+# GoogleSheetInterface.read() before this module ever sees the data. An
+# opted-out item leaves best_price/best_supplier/best_supplier_rating/
+# confidence all blank, so market_checked (always "never" or a timestamp)
+# is what keeps such rows from truncating.
+COLUMNS = [
+    "item",
+    "website",
+    "market",
+    "current",
+    "min",
+    "mean",
+    "last_checked",
+    "best_price",
+    "best_supplier",
+    "best_supplier_rating",
+    "confidence",
+    "sources",
+    "market_checked",
+]
 _SUMMARY_FIELDS = ["current", "min", "mean", "last_checked"]
+_MARKET_FIELDS = [
+    "best_price",
+    "best_supplier",
+    "best_supplier_rating",
+    "confidence",
+    "sources",
+]
+
+_TRUTHY = frozenset({"yes", "y", "true", "1"})
 
 
 class ItemsTab:
@@ -46,6 +77,11 @@ class ItemsTab:
             if not name or not website:
                 self.logger.warning(f"Row {position}: blank item or website, skipping")
                 continue
+            if website.lower() == MARKET_KEY:
+                self.logger.warning(
+                    f"Row {position}: '{MARKET_KEY}' is reserved, skipping"
+                )
+                continue
             key = (name, website)
             if key in seen:
                 self.logger.warning(
@@ -53,28 +89,47 @@ class ItemsTab:
                 )
                 continue
             seen.add(key)
-            items.append(Item(name=name, website=website))
+            # row.get("market") is None on a pre-upgrade sheet that has no
+            # market column at all, which correctly defaults it to opted-out.
+            market = str(row.get("market") or "").strip().lower() in _TRUTHY
+            items.append(Item(name=name, website=website, market=market))
         return items
 
-    def write_summary(self, items: list[Item], summary: pd.DataFrame) -> None:
-        """Rewrite the tab with each item's latest statistics."""
+    def write_summary(
+        self, items: list[Item], summary: pd.DataFrame, market: pd.DataFrame
+    ) -> None:
+        """Rewrite the tab with each item's latest supplier and market figures."""
         lookup: dict[tuple[str, str], dict] = {}
         if not summary.empty:
             lookup = {
                 (row["item"], row["website"]): row for row in summary.to_dict("records")
             }
+        # Keyed by item name only: a market sweep is not tied to a supplier.
+        market_lookup: dict[str, dict] = {}
+        if not market.empty:
+            market_lookup = {row["item"]: row for row in market.to_dict("records")}
 
         rows = []
         for item in items:
             stats = lookup.get((item.name, item.website), {})
-            row = {"item": item.name, "website": item.website}
+            swept = market_lookup.get(item.name, {})
+            row = {
+                "item": item.name,
+                "website": item.website,
+                "market": "yes" if item.market else "",
+            }
             for field in _SUMMARY_FIELDS:
                 row[field] = stats.get(field, "")
+            for field in _MARKET_FIELDS:
+                row[field] = swept.get(field, "")
+            row["market_checked"] = swept.get("market_checked", "")
             # "never" (not "") anchors the row's final column, and reads
             # more clearly than a blank cell, which is ambiguous between
             # "not checked yet" and "something went wrong".
             if not row["last_checked"]:
                 row["last_checked"] = "never"
+            if not row["market_checked"]:
+                row["market_checked"] = "never"
             rows.append(row)
 
         frame = pd.DataFrame(rows, columns=COLUMNS)

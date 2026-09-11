@@ -13,7 +13,7 @@ import pytest
 
 import price_monitor.price_monitor as price_monitor_module
 from price_monitor.app_config import PriceCtrl
-from price_monitor.models import Item, PriceReading, PriceStatus
+from price_monitor.models import MARKET_KEY, Item, PriceReading, PriceStatus
 from price_monitor.price_monitor import PriceMonitor, args_parser
 
 
@@ -54,19 +54,67 @@ class FakeSearcher:
         )
 
 
+class FakeMarketSearcher:
+    """Returns a canned market reading, or raises if told to."""
+
+    def __init__(self, price: float = 100.0, confidence: float = 0.9) -> None:
+        self.price = price
+        self.confidence = confidence
+        self.calls: list[str] = []
+        self.readings: list[PriceReading] = []
+        self.raises: Exception | None = None
+        self.seen_last_price: float | None = None
+
+    def price_market(
+        self, item: Item, last_price: float | None, timestamp: datetime
+    ) -> PriceReading:
+        self.calls.append(item.name)
+        self.seen_last_price = last_price
+        if self.raises is not None:
+            raise self.raises
+        reading = PriceReading(
+            timestamp=timestamp,
+            item=item.name,
+            website=MARKET_KEY,
+            price=self.price,
+            currency="GBP",
+            status=PriceStatus.OK,
+            source_url="https://argos.co.uk/w",
+            note="3 sources, cited, rated 4.4",
+            confidence=self.confidence,
+            rating="4.4 Trustpilot",
+        )
+        self.readings.append(reading)
+        return reading
+
+
 @pytest.fixture
 def logger() -> logging.Logger:
     return logging.getLogger("test")
 
 
+@pytest.fixture
+def market_searcher() -> FakeMarketSearcher:
+    return FakeMarketSearcher()
+
+
 def _monitor(
-    sheet: FakeSheet, searcher: FakeSearcher, logger: logging.Logger
+    sheet: FakeSheet,
+    searcher: FakeSearcher,
+    logger: logging.Logger,
+    market_searcher: FakeMarketSearcher | None = None,
 ) -> PriceMonitor:
-    return PriceMonitor.for_test(gsheet=sheet, searcher=searcher, logger=logger)
+    return PriceMonitor.for_test(
+        gsheet=sheet, searcher=searcher, logger=logger, market_searcher=market_searcher
+    )
 
 
 def _items(rows: list[dict[str, str]]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["item", "website"])
+
+
+def _items_with_market(rows: list[dict[str, str]]) -> pd.DataFrame:
+    return pd.DataFrame(rows, columns=["item", "website", "market"])
 
 
 def test_update_prices_every_item(logger):
@@ -276,11 +324,13 @@ def test_parser_accepts_once_flag():
     assert str(args.secrets) == "/tmp/s"
 
 
-def _history_row(item: str, when: datetime, status: str = "ok") -> dict[str, str]:
+def _history_row(
+    item: str, when: datetime, status: str = "ok", website: str = "shop.example"
+) -> dict[str, str]:
     return {
         "timestamp": when.strftime("%Y-%m-%d %H:%M:%S"),
         "item": item,
-        "website": "shop.example",
+        "website": website,
         "price": "100.00",
         "currency": "GBP",
         "source_url": "",
@@ -289,13 +339,17 @@ def _history_row(item: str, when: datetime, status: str = "ok") -> dict[str, str
     }
 
 
-def _sheet_with_history(rows: list[dict[str, str]], items: list[str]) -> FakeSheet:
-    return FakeSheet(
-        {
-            "Items": _items([{"item": n, "website": "shop.example"} for n in items]),
-            "Prices": pd.DataFrame(rows),
-        }
+def _sheet_with_history(
+    rows: list[dict[str, str]], items: list[str], market: bool = False
+) -> FakeSheet:
+    items_frame = (
+        _items_with_market(
+            [{"item": n, "website": "shop.example", "market": "yes"} for n in items]
+        )
+        if market
+        else _items([{"item": n, "website": "shop.example"} for n in items])
     )
+    return FakeSheet({"Items": items_frame, "Prices": pd.DataFrame(rows)})
 
 
 def test_update_skips_an_item_checked_within_the_refresh_window(logger):
@@ -428,9 +482,12 @@ class RecordingNotifier:
 
 
 def _monitor_with_notifier(
-    sheet: FakeSheet, searcher: FakeSearcher, logger: logging.Logger
+    sheet: FakeSheet,
+    searcher: FakeSearcher,
+    logger: logging.Logger,
+    market_searcher: FakeMarketSearcher | None = None,
 ) -> tuple[PriceMonitor, RecordingNotifier]:
-    monitor = _monitor(sheet, searcher, logger)
+    monitor = _monitor(sheet, searcher, logger, market_searcher)
     notifier = RecordingNotifier()
     monitor.notifier = notifier
     return monitor, notifier
@@ -577,8 +634,10 @@ class FixedPriceSearcher(FakeSearcher):
         return replace(super().price(item, last_price, timestamp), price=self._fixed)
 
 
-def _price_row(item: str, price: float, when: datetime) -> dict[str, str]:
-    row = _history_row(item, when)
+def _price_row(
+    item: str, price: float, when: datetime, website: str = "shop.example"
+) -> dict[str, str]:
+    row = _history_row(item, when, website=website)
     row["price"] = f"{price:.2f}"
     return row
 
@@ -707,3 +766,229 @@ def test_a_sharp_first_crossing_is_not_worded_as_still_falling(logger):
     monitor.update()
 
     assert "still falling" not in notifier.messages[-1]
+
+
+# --- market sweep ------------------------------------------------------------
+
+
+def test_an_opted_in_item_is_priced_twice(logger, market_searcher):
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [{"item": "Widget", "website": "shop.example", "market": "yes"}]
+            )
+        }
+    )
+    searcher = FakeSearcher()
+    _monitor(sheet, searcher, logger, market_searcher).update(force=True)
+
+    websites = list(sheet.tabs["Prices"]["website"])
+    assert len(sheet.tabs["Prices"]) == 2
+    assert "shop.example" in websites
+    assert MARKET_KEY in websites
+    assert market_searcher.calls == ["Widget"]
+
+
+def test_the_same_item_at_two_websites_is_swept_only_once(logger, market_searcher):
+    """Both rows are opted in for the same product name, tracked at two
+    retailers. Each row must still get its own supplier reading, but the
+    sweep is not tied to a supplier and must fire only once."""
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [
+                    {"item": "Widget", "website": "shop-a.example", "market": "yes"},
+                    {"item": "Widget", "website": "shop-b.example", "market": "yes"},
+                ]
+            )
+        }
+    )
+    searcher = FakeSearcher()
+    _monitor(sheet, searcher, logger, market_searcher).update(force=True)
+
+    prices = sheet.tabs["Prices"]
+    assert len(prices) == 3
+    assert list(prices["website"]).count("shop-a.example") == 1
+    assert list(prices["website"]).count("shop-b.example") == 1
+    assert list(prices["website"]).count(MARKET_KEY) == 1
+    assert market_searcher.calls == ["Widget"]
+
+
+def test_two_different_items_are_each_swept(logger, market_searcher):
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [
+                    {"item": "Widget", "website": "shop-a.example", "market": "yes"},
+                    {"item": "Gadget", "website": "shop-b.example", "market": "yes"},
+                ]
+            )
+        }
+    )
+    searcher = FakeSearcher()
+    _monitor(sheet, searcher, logger, market_searcher).update(force=True)
+
+    assert market_searcher.calls == ["Widget", "Gadget"]
+
+
+def test_an_opted_out_item_is_priced_once(logger, market_searcher):
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [{"item": "Widget", "website": "shop.example", "market": ""}]
+            )
+        }
+    )
+    _monitor(sheet, FakeSearcher(), logger, market_searcher).update(force=True)
+    assert len(sheet.tabs["Prices"]) == 1
+    assert market_searcher.calls == []
+
+
+def test_an_opted_in_item_without_a_market_searcher_is_priced_once(logger):
+    """`for_test` allows building a controller with no market searcher at
+    all; an opted-in item must degrade to supplier-only, not raise."""
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [{"item": "Widget", "website": "shop.example", "market": "yes"}]
+            )
+        }
+    )
+    _monitor(sheet, FakeSearcher(), logger, None).update(force=True)
+    assert len(sheet.tabs["Prices"]) == 1
+    assert list(sheet.tabs["Prices"]["website"]) == ["shop.example"]
+
+
+def test_the_sweep_receives_the_markets_last_price_not_the_suppliers(
+    logger, market_searcher
+):
+    """The two lookups keep separate (item, website) series in history, so a
+    crossed key would hand the sweep the supplier's last price — and
+    MarketSearcher would then flag a legitimately cheaper market figure as
+    having suspiciously moved against the wrong baseline."""
+
+    class RecordingSearcher(FakeSearcher):
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen_last_price: float | None = None
+
+        def price(
+            self, item: Item, last_price: float | None, timestamp: datetime
+        ) -> PriceReading:
+            self.seen_last_price = last_price
+            return super().price(item, last_price, timestamp)
+
+    old = datetime.now() - timedelta(hours=7)
+    rows = [
+        _price_row("Widget", 100.0, old),
+        _price_row("Widget", 40.0, old, website=MARKET_KEY),
+    ]
+    sheet = _sheet_with_history(rows, ["Widget"], market=True)
+    searcher = RecordingSearcher()
+    _monitor(sheet, searcher, logger, market_searcher).update(force=True)
+
+    assert searcher.seen_last_price == 100.0
+    assert market_searcher.seen_last_price == 40.0
+
+
+def test_a_failing_sweep_does_not_cost_the_supplier_price(logger, market_searcher):
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [{"item": "Widget", "website": "shop.example", "market": "yes"}]
+            )
+        }
+    )
+    market_searcher.raises = RuntimeError("sweep exploded")
+    _monitor(sheet, FakeSearcher(), logger, market_searcher).update(force=True)
+
+    prices = sheet.tabs["Prices"]
+    supplier = prices[prices["website"] == "shop.example"]
+    swept = prices[prices["website"] == MARKET_KEY]
+    assert supplier.iloc[0]["status"] == PriceStatus.OK.value
+    assert swept.iloc[0]["status"] == PriceStatus.ERROR.value
+
+
+# --- confidence gate ---------------------------------------------------------
+
+
+def _seed_market_history(item: str, prices: list[float]) -> list[dict[str, str]]:
+    """Three prior priced rows for ``(item, MARKET_KEY)`` — new_drop_band stays
+    silent below _MIN_READINGS, so a drop test needs a settled baseline."""
+    old = datetime.now() - timedelta(hours=7)
+    return [
+        _price_row(
+            item, price, old - timedelta(hours=len(prices) - i), website=MARKET_KEY
+        )
+        for i, price in enumerate(prices)
+    ]
+
+
+def _seed_supplier_history(item: str, prices: list[float]) -> list[dict[str, str]]:
+    """Three prior priced rows for ``(item, shop.example)``, same reasoning."""
+    old = datetime.now() - timedelta(hours=7)
+    return [
+        _price_row(item, price, old - timedelta(hours=len(prices) - i))
+        for i, price in enumerate(prices)
+    ]
+
+
+def test_a_low_confidence_drop_is_recorded_but_not_announced(logger, market_searcher):
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [{"item": "Widget", "website": "shop.example", "market": "yes"}]
+            ),
+            "Prices": pd.DataFrame(
+                _seed_market_history("Widget", [200.0, 200.0, 200.0])
+            ),
+        }
+    )
+    market_searcher.price = 100.0
+    market_searcher.confidence = 0.4
+    monitor, notifier = _monitor_with_notifier(
+        sheet, FakeSearcher(), logger, market_searcher
+    )
+    monitor.update(force=True)
+
+    prices = sheet.tabs["Prices"]
+    swept = prices[prices["website"] == MARKET_KEY]
+    assert any(float(p) == 100.0 for p in swept["price"])
+    assert _drops(notifier) == []
+
+
+def test_a_confident_drop_is_announced(logger, market_searcher):
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [{"item": "Widget", "website": "shop.example", "market": "yes"}]
+            ),
+            "Prices": pd.DataFrame(
+                _seed_market_history("Widget", [200.0, 200.0, 200.0])
+            ),
+        }
+    )
+    market_searcher.price = 100.0
+    market_searcher.confidence = 0.9
+    monitor, notifier = _monitor_with_notifier(
+        sheet, FakeSearcher(), logger, market_searcher
+    )
+    monitor.update(force=True)
+
+    assert any("📉" in m and "argos.co.uk" in m for m in _drops(notifier))
+
+
+def test_a_supplier_drop_is_unaffected_by_the_confidence_gate(logger):
+    """Supplier readings carry no confidence, so the gate must ignore them."""
+    sheet = FakeSheet(
+        {
+            "Items": _items([{"item": "Widget", "website": "shop.example"}]),
+            "Prices": pd.DataFrame(
+                _seed_supplier_history("Widget", [200.0, 200.0, 200.0])
+            ),
+        }
+    )
+    monitor, notifier = _monitor_with_notifier(sheet, FixedPriceSearcher(100.0), logger)
+    monitor.update(force=True)
+
+    assert _drops(notifier) != []

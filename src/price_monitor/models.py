@@ -1,13 +1,26 @@
 """Value objects for PriceMonitor.
 
-Defines the tracked :class:`Item`, the :class:`PriceReading` recorded for it on
+Defines the tracked :class:`Item` and :class:`PriceReading` recorded for it on
 each run, the :class:`PriceStatus` describing how that reading turned out, and
-the :class:`PriceStats` summarising an item's history so far.
+the :class:`PriceStats` summarising an item's history so far. Exports the
+:data:`MARKET_KEY` sentinel and :func:`supplier_domain` utility for market sweeps.
 """
 
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from urllib.parse import urlparse
+
+# The sentinel `website` under which a UK-wide market sweep is recorded, so its
+# readings share the history tab with per-supplier ones while keeping their own
+# (item, website) series: their own mean, baseline and drop bands.
+MARKET_KEY = "market"
+
+
+def supplier_domain(url: str) -> str:
+    """The bare domain of ``url``, as the sheet's ``best_supplier`` value."""
+    netloc = urlparse(url.strip()).netloc.lower()
+    return netloc[4:] if netloc.startswith("www.") else netloc
 
 
 class PriceStatus(str, Enum):
@@ -28,6 +41,7 @@ class Item:
 
     name: str
     website: str
+    market: bool = False
 
     @property
     def is_direct_url(self) -> bool:
@@ -53,6 +67,9 @@ class PriceReading:
     status: PriceStatus
     source_url: str = ""
     note: str = ""
+    confidence: float | None = None
+    rating: str = ""
+    sources: int | None = None
 
 
 # Below this many readings the mean tracks jitter rather than a settled price,

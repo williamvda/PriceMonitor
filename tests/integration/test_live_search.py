@@ -12,8 +12,9 @@ import pandas as pd
 import pytest
 from llmbridge import LLMClient
 
-from price_monitor.models import Item, PriceReading, PriceStatus
+from price_monitor.models import MARKET_KEY, Item, PriceReading, PriceStatus
 from price_monitor.search.gemini_search import grounding_urls
+from price_monitor.search.market import MarketSearcher
 from price_monitor.search.prompts import search_prompt
 from price_monitor.search.searcher import PriceSearcher
 from price_monitor.sheets.history_tab import COLUMNS, HistoryTab
@@ -179,6 +180,45 @@ def test_history_round_trip_survives_trailing_empty_cells(config, logger, gsheet
         assert row["status"] == "not_found"
     finally:
         _delete_tab(gsheet, _SCRATCH_HISTORY_TAB, logger)
+
+
+def test_live_market_sweep_returns_a_scored_reading(config, logger):
+    """One real UK-wide sweep. Asserts shape and plausibility, never a price.
+
+    A mainstream, widely-stocked item is chosen deliberately: the assertion
+    that the parsed source count is at least 2 is the point of this test. If
+    a routine sweep of something this common turns up only one retailer, the
+    market prompt has drifted padding-averse, and that is worth catching here
+    rather than discovering it later as a string of confidence-0.33 readings.
+    """
+    searcher = MarketSearcher(config.llm_config, config.price_ctrl, logger)
+    item = Item(name="Raspberry Pi 5 8GB", website="shop.example", market=True)
+
+    reading = searcher.price_market(item, None, datetime.now())
+
+    assert reading.website == MARKET_KEY
+    assert reading.status in {
+        PriceStatus.OK,
+        PriceStatus.SUSPECT,
+        PriceStatus.NOT_FOUND,
+    }
+    if reading.price is not None:
+        assert 0 < reading.price < config.price_ctrl.max_plausible_price
+        assert reading.confidence is not None
+        assert 0.0 <= reading.confidence <= 1.0
+        assert reading.source_url.startswith("http")
+        # The reason string always starts "<n> source(s)"; n is the whole
+        # point of the sweep. A mainstream item that returns a single
+        # retailer means the prompt has drifted padding-averse, which
+        # silently guts the corroboration factor and caps every sweep at
+        # 0.33.
+        try:
+            sources = int(reading.note.split()[0])
+        except (IndexError, ValueError):
+            raise AssertionError(
+                f"could not parse source count from note: {reading.note!r}"
+            )
+        assert sources >= 2, f"sweep found only {sources} retailer(s): {reading.note}"
 
 
 def _delete_tab(gsheet, sheet_name: str, logger: logging.Logger) -> None:

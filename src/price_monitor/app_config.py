@@ -53,6 +53,10 @@ class PriceCtrl:
     # announced once per band it gives up, so a slow slide keeps reporting
     # without a message on every refresh. 0.05 = one message per 5% lost.
     drop_step: float = 0.05
+    # A market sweep below this confidence is recorded but never announced.
+    # Corroboration alone caps a single-source sweep at 0.33, so this threshold
+    # is also what decides that one retailer is not a market.
+    market_min_confidence: float = 0.5
     max_plausible_price: float = 100000.0
     request_delay_s: float = 2.0
 
