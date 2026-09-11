@@ -242,11 +242,12 @@ def test_a_missing_market_column_reads_as_opted_out(logger):
     assert items[0].market is False
 
 
-def test_the_market_sentinel_is_rejected_as_a_website(logger):
+@pytest.mark.parametrize("sentinel", ["market", "Market", "MARKET", "  Market  "])
+def test_the_market_sentinel_is_rejected_as_a_website(logger, sentinel):
     """Otherwise a typo silently merges an item into the market series."""
     frame = pd.DataFrame(
         [
-            {"item": "Widget", "website": "market", "market": ""},
+            {"item": "Widget", "website": sentinel, "market": ""},
             {"item": "Gadget", "website": "shop.example", "market": ""},
         ]
     )
