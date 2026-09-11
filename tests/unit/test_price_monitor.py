@@ -789,6 +789,48 @@ def test_an_opted_in_item_is_priced_twice(logger, market_searcher):
     assert market_searcher.calls == ["Widget"]
 
 
+def test_the_same_item_at_two_websites_is_swept_only_once(logger, market_searcher):
+    """Both rows are opted in for the same product name, tracked at two
+    retailers. Each row must still get its own supplier reading, but the
+    sweep is not tied to a supplier and must fire only once."""
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [
+                    {"item": "Widget", "website": "shop-a.example", "market": "yes"},
+                    {"item": "Widget", "website": "shop-b.example", "market": "yes"},
+                ]
+            )
+        }
+    )
+    searcher = FakeSearcher()
+    _monitor(sheet, searcher, logger, market_searcher).update(force=True)
+
+    prices = sheet.tabs["Prices"]
+    assert len(prices) == 3
+    assert list(prices["website"]).count("shop-a.example") == 1
+    assert list(prices["website"]).count("shop-b.example") == 1
+    assert list(prices["website"]).count(MARKET_KEY) == 1
+    assert market_searcher.calls == ["Widget"]
+
+
+def test_two_different_items_are_each_swept(logger, market_searcher):
+    sheet = FakeSheet(
+        {
+            "Items": _items_with_market(
+                [
+                    {"item": "Widget", "website": "shop-a.example", "market": "yes"},
+                    {"item": "Gadget", "website": "shop-b.example", "market": "yes"},
+                ]
+            )
+        }
+    )
+    searcher = FakeSearcher()
+    _monitor(sheet, searcher, logger, market_searcher).update(force=True)
+
+    assert market_searcher.calls == ["Widget", "Gadget"]
+
+
 def test_an_opted_out_item_is_priced_once(logger, market_searcher):
     sheet = FakeSheet(
         {

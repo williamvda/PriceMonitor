@@ -230,6 +230,11 @@ class PriceMonitor:
     def _price_all(self, items: list[Item]) -> list[PriceReading]:
         last_prices = self.history.last_prices()
         readings: list[PriceReading] = []
+        # A sweep is not tied to any supplier, so two rows for the same item
+        # name (tracked at two websites, both opted in) must sweep only once —
+        # otherwise the market series double-counts the reading and a single
+        # run can fire the same market-drop notification twice.
+        swept: set[str] = set()
 
         for index, item in enumerate(items):
             if index and self.ctrl.request_delay_s:
@@ -237,7 +242,12 @@ class PriceMonitor:
             readings.append(
                 self._price_one(item, last_prices.get((item.name, item.website)))
             )
-            if item.market and self._market_searcher is not None:
+            if (
+                item.market
+                and self._market_searcher is not None
+                and item.name not in swept
+            ):
+                swept.add(item.name)
                 if self.ctrl.request_delay_s:
                     self.stop_event.wait(self.ctrl.request_delay_s)
                 readings.append(
