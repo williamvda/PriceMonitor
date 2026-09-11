@@ -33,10 +33,17 @@ COLUMNS = [
     "best_supplier",
     "best_supplier_rating",
     "confidence",
+    "sources",
     "market_checked",
 ]
 _SUMMARY_FIELDS = ["current", "min", "mean", "last_checked"]
-_MARKET_FIELDS = ["best_price", "best_supplier", "best_supplier_rating", "confidence"]
+_MARKET_FIELDS = [
+    "best_price",
+    "best_supplier",
+    "best_supplier_rating",
+    "confidence",
+    "sources",
+]
 
 _TRUTHY = frozenset({"yes", "y", "true", "1"})
 

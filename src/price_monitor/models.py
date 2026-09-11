@@ -69,6 +69,7 @@ class PriceReading:
     note: str = ""
     confidence: float | None = None
     rating: str = ""
+    sources: int | None = None
 
 
 # Below this many readings the mean tracks jitter rather than a settled price,

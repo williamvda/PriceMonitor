@@ -137,7 +137,8 @@ Columns A–C are the user's; the tool owns D onward.
 | I | `best_supplier` | tool | Domain of the winning URL. Blank when never swept. |
 | J | `best_supplier_rating` | tool | The winner's review score with its source, e.g. `4.1 Trustpilot`. Blank when unknown or never swept. |
 | K | `confidence` | tool | `0.00`–`1.00` for that reading. Blank when never swept. |
-| L | `market_checked` | tool | Timestamp of the latest sweep of any status, or `never`. |
+| L | `sources` | tool | Count of retailers that survived validation on the latest sweep. Blank when never swept, and never `0`. |
+| M | `market_checked` | tool | Timestamp of the latest sweep of any status, or `never`. |
 
 `market_checked` MUST stay last and MUST never be blank. This is the same trap
 documented for `status` in `history_tab.py`: the Sheets API omits trailing
@@ -159,12 +160,20 @@ than a mixture of spellings.
 the reason documented in `history_tab.py`:
 
 ```
-timestamp, item, website, price, currency, source_url, note, confidence, rating, status
+timestamp, item, website, price, currency, source_url, note, confidence, rating, sources, status
 ```
 
 Both are blank on supplier rows. A market row carries the winning supplier's
 page in `source_url` and the scoring rationale in `note`, e.g.
 `4 sources, winner 11% under median, cited, rated 4.1`.
+
+`sources` is the count of candidates that survived validation — in stock,
+right currency, above the reputation floor — not the number the model named.
+That is the count corroboration scored, and the one the user can act on: five
+retailers named but four out of stock means one shop can actually sell it. A
+sweep that produced no reading at all leaves it blank rather than `0`, because
+`not_found` genuinely found zero while `error` and `parse_error` never got far
+enough to know, and `status` already distinguishes them.
 
 `rating` is stored as a display string — `4.1 Trustpilot`, or `""` when the
 sweep found no usable rating — not as a number plus a separate source column.

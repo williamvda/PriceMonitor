@@ -305,3 +305,51 @@ def test_a_raising_client_is_an_error_not_an_exception(logger):
     reading = searcher.price_market(ITEM, None, NOW)
     assert reading.status == PriceStatus.ERROR
     assert reading.website == MARKET_KEY
+
+
+def test_a_sweep_records_how_many_retailers_it_found(logger):
+    searcher = _searcher(
+        logger,
+        [
+            _candidate(price=120.0, url="https://a.co.uk/w"),
+            _candidate(price=100.0, url="https://b.co.uk/w"),
+            _candidate(price=110.0, url="https://c.co.uk/w"),
+        ],
+    )
+    assert searcher.price_market(ITEM, None, NOW).sources == 3
+
+
+def test_a_single_retailer_sweep_records_one_source(logger):
+    """The signal the user acts on: only one retailer could actually sell it."""
+    searcher = _searcher(logger, [_candidate(price=100.0)])
+    reading = searcher.price_market(ITEM, None, NOW)
+    assert reading.sources == 1
+
+
+def test_the_source_count_excludes_candidates_that_were_dropped(logger):
+    """Counts retailers that survived validation, not ones the model named.
+
+    Five reported but four unusable means one retailer can actually sell it,
+    which is the fact worth surfacing — and the same count corroboration scored.
+    """
+    searcher = _searcher(
+        logger,
+        [
+            _candidate(price=100.0, url="https://keep.co.uk/w"),
+            _candidate(price=10.0, in_stock=False, url="https://a.co.uk/w"),
+            _candidate(price=20.0, currency="USD", url="https://b.co.uk/w"),
+            _candidate(
+                price=30.0, rating=2.1, rating_count=900, url="https://c.co.uk/w"
+            ),
+            _candidate(price=-5.0, url="https://d.co.uk/w"),
+        ],
+    )
+    reading = searcher.price_market(ITEM, None, NOW)
+    assert reading.sources == 1
+    assert reading.price == 100.0
+
+
+def test_a_failed_sweep_records_no_source_count(logger):
+    """`error`/`parse_error` never got far enough to know; blank, not zero."""
+    searcher = _searcher(logger, [])
+    assert searcher.price_market(ITEM, None, NOW).sources is None

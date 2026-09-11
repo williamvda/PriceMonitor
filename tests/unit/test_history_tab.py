@@ -43,6 +43,7 @@ def _reading(
     website="shop.example",
     confidence=None,
     rating="",
+    sources=None,
 ):
     return PriceReading(
         timestamp=datetime.strptime(when, "%Y-%m-%d %H:%M:%S"),
@@ -54,6 +55,7 @@ def _reading(
         source_url=source_url,
         confidence=confidence,
         rating=rating,
+        sources=sources,
     )
 
 
@@ -636,3 +638,38 @@ def test_market_checked_moves_even_when_a_sweep_finds_nothing(logger):
     row = tab.market_summary().iloc[0]
     assert row["best_price"] == 100.0
     assert row["market_checked"] == "2026-09-12 06:00:00"
+
+
+def test_source_count_round_trips_and_status_stays_last(logger):
+    sheet = FakeSheet()
+    history = HistoryTab(sheet, "Prices", logger)
+    history.append([_reading(website=MARKET_KEY, sources=4, confidence=0.95)])
+
+    frame = history.read()
+    assert list(frame.columns)[-1] == "status"
+    assert frame["sources"].iloc[0] == "4"
+
+
+def test_supplier_rows_leave_the_source_count_blank(logger):
+    sheet = FakeSheet()
+    history = HistoryTab(sheet, "Prices", logger)
+    history.append([_reading(website="shop.example")])
+    assert history.read()["sources"].iloc[0] == ""
+
+
+def test_market_summary_carries_the_source_count(logger):
+    sheet = FakeSheet()
+    history = HistoryTab(sheet, "Prices", logger)
+    history.append(
+        [
+            _reading(
+                website=MARKET_KEY, price=120.0, sources=3, when="2026-08-20 06:00:00"
+            ),
+            _reading(
+                website=MARKET_KEY, price=100.0, sources=1, when="2026-08-21 06:00:00"
+            ),
+        ]
+    )
+    row = history.market_summary().iloc[0]
+    assert row["sources"] == "1"
+    assert row["best_price"] == 100.0

@@ -131,6 +131,19 @@ def test_supplier_domain_strips_scheme_and_www(url, expected):
     assert supplier_domain(url) == expected
 
 
+def test_reading_defaults_carry_no_source_count():
+    """A supplier reading has no retailer count; only a sweep does."""
+    reading = PriceReading(
+        timestamp=datetime(2026, 9, 11, 6, 0, 0),
+        item="Widget",
+        website="shop.example",
+        price=10.0,
+        currency="GBP",
+        status=PriceStatus.OK,
+    )
+    assert reading.sources is None
+
+
 def test_reading_defaults_carry_no_confidence_or_rating():
     reading = PriceReading(
         timestamp=datetime(2026, 9, 11, 6, 0, 0),

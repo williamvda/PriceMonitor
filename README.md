@@ -104,6 +104,28 @@ The `note` column on a market row always explains the score, so a low
 confidence is never a mystery you have to re-run the lookup to understand,
 e.g. `3 sources, winner 8% under median, cited, rated 4.4`.
 
+
+#### When a sweep finds only one retailer
+
+The `sources` column counts the retailers a sweep actually found — meaning
+ones that survived every check: in stock, priced in your currency, and not
+below the reputation floor. A model that names five retailers of which four
+are out of stock leaves `sources` at 1, because one shop is all that can
+actually sell you the thing.
+
+A `1` here is worth acting on. It caps confidence at 0.33, which with the
+default `market_min_confidence` means that item will never announce a drop —
+so the sweep is costing you a billed search every run and can never tell you
+anything. Usually it means the product name is too specific or too obscure to
+match across retailers. Either broaden the name in the `item` column, point
+`website` at a supplier you actually want tracked and leave the sweep to do
+less work, or turn `market` off for that row.
+
+Sort or filter the Items tab on `sources`, or conditional-format `=1`, to find
+these rows at a glance. A blank means the item has never been swept; a `0`
+never appears, because a sweep that found nothing records no count at all —
+`status` on the Prices tab says what went wrong instead.
+
 ## The sheet
 
 PriceMonitor expects a Google Sheet with two tabs, named by `items_sheet`
@@ -126,6 +148,7 @@ You own columns A through C; everything after them is rewritten on every run.
 | `best_supplier`         | tool | The domain of the retailer behind `best_price`.                        |
 | `best_supplier_rating`  | tool | That retailer's review rating and source, e.g. `4.1 Trustpilot`; blank if unrated. |
 | `confidence`            | tool | The market sweep's confidence score, `0`–`1`. See [What confidence means](#what-confidence-means). |
+| `sources`               | tool | How many retailers the last sweep actually found — see [When a sweep finds only one retailer](#when-a-sweep-finds-only-one-retailer). Blank if never swept. |
 | `market_checked`        | tool | Timestamp of the most recent sweep attempt. Reads `never` for an item never swept — including every item with `market` left blank. |
 
 Blank or duplicate `(item, website)` rows are skipped and logged, not sent
@@ -135,7 +158,7 @@ to the LLM.
 
 Append-only: one row is added per item on every run that prices it,
 regardless of outcome. Columns: `timestamp`, `item`, `website`, `price`,
-`currency`, `source_url`, `note`, `confidence`, `rating`, `status`.
+`currency`, `source_url`, `note`, `confidence`, `rating`, `sources`, `status`.
 
 A market sweep is recorded here too, under the website `market` rather than
 your tracked supplier's domain — so an item with `market` set to `yes` gets

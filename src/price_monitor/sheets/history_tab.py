@@ -37,6 +37,7 @@ COLUMNS = [
     "note",
     "confidence",
     "rating",
+    "sources",
     "status",
 ]
 
@@ -48,6 +49,7 @@ MARKET_SUMMARY_COLUMNS = [
     "best_supplier",
     "best_supplier_rating",
     "confidence",
+    "sources",
     "market_checked",
 ]
 
@@ -229,6 +231,7 @@ class HistoryTab:
                     "confidence": (
                         str(latest["confidence"]) if latest is not None else ""
                     ),
+                    "sources": str(latest["sources"]) if latest is not None else "",
                     "market_checked": ordered["timestamp"].iloc[-1],
                 }
             )
@@ -257,5 +260,6 @@ def _to_row(reading: PriceReading) -> dict[str, str]:
             "" if reading.confidence is None else f"{reading.confidence:.2f}"
         ),
         "rating": reading.rating,
+        "sources": "" if reading.sources is None else str(reading.sources),
         "status": reading.status.value,
     }

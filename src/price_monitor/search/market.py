@@ -155,6 +155,10 @@ class MarketSearcher:
             note=note,
             confidence=value,
             rating=winner.rating_label,
+            # Survivors, not the number the model named: a retailer that is
+            # out of stock or below the floor cannot sell it, and this is the
+            # same count corroboration scored.
+            sources=len(candidates),
         )
 
     def _candidates(self, payload: dict) -> list[tuple[Candidate, str]]:

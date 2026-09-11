@@ -320,3 +320,39 @@ def test_ragged_frame_from_api_does_not_create_nan_items(logger, caplog):
     # Only the complete row should be kept; the ragged row skipped
     assert items == [Item(name="Widget", website="shop.example")]
     assert any("blank item or website" in record.message for record in caplog.records)
+
+
+def test_write_summary_shows_the_source_count(logger):
+    sheet = FakeSheet()
+    market = pd.DataFrame(
+        [
+            {
+                "item": "Widget",
+                "best_price": 100.0,
+                "best_supplier": "argos.co.uk",
+                "best_supplier_rating": "4.4 Trustpilot",
+                "confidence": "0.33",
+                "sources": "1",
+                "market_checked": "2026-09-11 06:00:00",
+            }
+        ]
+    )
+    ItemsTab(sheet, "Items", logger).write_summary(
+        [Item(name="Widget", website="shop.example", market=True)],
+        pd.DataFrame(),
+        market,
+    )
+    row = sheet.frame.iloc[0]
+    assert row["sources"] == "1"
+    assert list(sheet.frame.columns)[-1] == "market_checked"
+
+
+def test_an_unswept_item_leaves_the_source_count_blank(logger):
+    """market_checked must still anchor the row when sources is blank too."""
+    sheet = FakeSheet()
+    ItemsTab(sheet, "Items", logger).write_summary(
+        [Item(name="Widget", website="shop.example")], pd.DataFrame(), pd.DataFrame()
+    )
+    row = sheet.frame.iloc[0]
+    assert row["sources"] == ""
+    assert row["market_checked"] == "never"
