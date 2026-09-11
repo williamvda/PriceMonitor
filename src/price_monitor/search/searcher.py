@@ -6,8 +6,11 @@ structured output are unreliable together. Every failure path returns a
 :class:`PriceReading` carrying a status — nothing raises out of :meth:`price`.
 
 Both calls retry transient server-side failures with exponential backoff; see
-:func:`_is_retryable` for what counts. Grounding on call one can be switched
-off via ``LLMConfig.grounded``.
+:func:`retrying` for the retry mechanism and :func:`_is_retryable` for what
+counts. Grounding on call one can be switched off via ``LLMConfig.grounded``.
+
+Exports :func:`retrying` (the retry loop) and :const:`FORMAT_PROVIDER` (the
+un-grounded provider name) for reuse by other searchers.
 """
 
 import logging
@@ -33,7 +36,7 @@ from price_monitor.search.validation import validate
 
 # Call two must not be grounded: it is the un-grounded regime that makes JSON
 # output reliable, which is the whole reason the lookup is split in two.
-_FORMAT_PROVIDER = "gemini"
+FORMAT_PROVIDER = "gemini"
 
 _RETRY_ATTEMPTS = 3
 _RETRY_BASE_DELAY_S = 2.0
@@ -51,6 +54,31 @@ def _is_retryable(exc: Exception) -> bool:
     return isinstance(exc, LLMResponseError) and exc.status_code in _RETRYABLE_STATUS
 
 
+def retrying(
+    call: Callable[[], PromptResponse], label: str, logger: logging.Logger
+) -> PromptResponse:
+    """Run ``call``, retrying transient failures with exponential backoff.
+
+    The final attempt re-raises rather than swallowing, so the caller maps the
+    failure to a status itself.
+    """
+    delay = _RETRY_BASE_DELAY_S
+    for attempt in range(1, _RETRY_ATTEMPTS + 1):
+        try:
+            return call()
+        except Exception as exc:
+            if attempt == _RETRY_ATTEMPTS or not _is_retryable(exc):
+                raise
+            logger.warning(
+                f"Transient {label} failure "
+                f"(attempt {attempt}/{_RETRY_ATTEMPTS}), "
+                f"retrying in {delay:.0f}s: {exc}"
+            )
+            time.sleep(delay)
+            delay *= 2
+    raise LLMError(f"{label} call exhausted retries")  # unreachable
+
+
 class PriceSearcher:
     """Prices a single :class:`Item` using a grounded search then a formatter."""
 
@@ -64,7 +92,7 @@ class PriceSearcher:
     ) -> None:
         self.logger = get_child_logger(logger, __class__.__name__)
         self._ctrl = ctrl
-        search_provider = config.provider if config.grounded else _FORMAT_PROVIDER
+        search_provider = config.provider if config.grounded else FORMAT_PROVIDER
         if not config.grounded:
             self.logger.warning(
                 "Grounding disabled: prices come from model recall, and "
@@ -79,7 +107,7 @@ class PriceSearcher:
             timeout=config.timeout,
         )
         self._format_client = format_client or LLMClient(
-            provider=_FORMAT_PROVIDER,
+            provider=FORMAT_PROVIDER,
             api_key=config.api_key,
             model=config.model,
             max_tokens=config.max_tokens,
@@ -92,8 +120,10 @@ class PriceSearcher:
     ) -> PriceReading:
         """Look up ``item``'s current price, never raising on failure."""
         try:
-            searched = self._retrying(
-                lambda: self._search_client.prompt(search_prompt(item)), "search"
+            searched = retrying(
+                lambda: self._search_client.prompt(search_prompt(item)),
+                "search",
+                self.logger,
             )
         except (LLMError, KeyError, IndexError, TypeError) as exc:
             # llmbridge's LLMClient.prompt() wraps only transport failures
@@ -115,9 +145,10 @@ class PriceSearcher:
         urls = grounding_urls(searched.raw_response)
 
         try:
-            formatted = self._retrying(
+            formatted = retrying(
                 lambda: self._format_client.prompt(format_prompt(searched.text, urls)),
                 "format",
+                self.logger,
             )
         except (LLMError, KeyError, IndexError, TypeError) as exc:
             # Same unguarded parse_response() exposure as call one above —
@@ -132,30 +163,6 @@ class PriceSearcher:
             return self._failed(item, timestamp, PriceStatus.PARSE_ERROR, str(exc))
 
         return validate(payload, item, timestamp, self._ctrl, last_price, urls)
-
-    def _retrying(
-        self, call: Callable[[], PromptResponse], label: str
-    ) -> PromptResponse:
-        """Run ``call``, retrying transient failures with exponential backoff.
-
-        The final attempt re-raises rather than swallowing, so :meth:`price`
-        maps the failure to a status exactly as it did before.
-        """
-        delay = _RETRY_BASE_DELAY_S
-        for attempt in range(1, _RETRY_ATTEMPTS + 1):
-            try:
-                return call()
-            except Exception as exc:
-                if attempt == _RETRY_ATTEMPTS or not _is_retryable(exc):
-                    raise
-                self.logger.warning(
-                    f"Transient {label} failure "
-                    f"(attempt {attempt}/{_RETRY_ATTEMPTS}), "
-                    f"retrying in {delay:.0f}s: {exc}"
-                )
-                time.sleep(delay)
-                delay *= 2
-        raise LLMError(f"{label} call exhausted retries")  # unreachable
 
     def _failed(
         self, item: Item, timestamp: datetime, status: PriceStatus, note: str
