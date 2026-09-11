@@ -169,7 +169,9 @@ class PriceMonitor:
             readings = self._price_all(items)
             self.history.append(readings)
             self.items_tab.write_summary(
-                self.items_tab.read(), self.history.summarise()
+                self.items_tab.read(),
+                self.history.summarise(),
+                self.history.market_summary(),
             )
         except Exception as exc:
             self.notifier.notify(format_check_failed(label, exc))
