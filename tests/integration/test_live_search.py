@@ -5,18 +5,13 @@ Requires PRICE_MONITOR_SECRETS to point at a configured secrets directory.
 """
 
 import logging
-from dataclasses import replace
 from datetime import datetime
 
 import pandas as pd
 import pytest
-from llmbridge import LLMClient
 
-from price_monitor.models import MARKET_KEY, Item, PriceReading, PriceStatus
-from price_monitor.search.gemini_search import grounding_urls
+from price_monitor.models import Item, PriceReading, PriceStatus
 from price_monitor.search.market import MarketSearcher
-from price_monitor.search.prompts import search_prompt
-from price_monitor.search.searcher import PriceSearcher
 from price_monitor.sheets.history_tab import COLUMNS, HistoryTab
 
 pytestmark = pytest.mark.integration
@@ -24,98 +19,6 @@ pytestmark = pytest.mark.integration
 # Never the configured real history tab — a name this unlikely to collide with
 # a genuine sheet, created and torn down entirely within the test below.
 _SCRATCH_HISTORY_TAB = "_price_monitor_integration_scratch_history"
-
-# Chosen because search grounding can actually reach it: this retailer's prices
-# are in Google's index, and a bare domain routes to the site-search prompt
-# rather than a page fetch. Bot-gated targets are useless as a canary here —
-# amazon.co.uk, and printerland's own product pages (Cloudflare serves a
-# challenge to any automated fetch), return not_found however well the pipeline
-# works. Before "fixing" a failure by swapping this item, check the product is
-# still listed: a genuine regression looks the same as a delisted SKU.
-_LIVE_ITEM = Item(name="Epson EcoTank ET-4850", website="printerland.co.uk")
-
-
-class _Replay:
-    """Serves one already-fetched response, so call two runs for free."""
-
-    def __init__(self, response) -> None:
-        self._response = response
-
-    def prompt(self, prompt_text: str, **kwargs):
-        return self._response
-
-
-def test_grounding_is_live_and_the_pipeline_grades_the_result(config, logger):
-    """Grounding executed, and the two-call pipeline graded what came back.
-
-    The load-bearing assertion is the presence of grounding citations, not a
-    price. ``groundingMetadata`` cannot appear unless the search tool actually
-    ran, so it goes red exactly when something real breaks — quota withdrawn,
-    the tool key wrong, the provider regressed — and stays green regardless of
-    whether one retailer happened to list a price today.
-
-    An earlier version required OK/SUSPECT/WRONG_CURRENCY. It failed on live
-    stock levels rather than on defects: the same item passed in the morning
-    and failed the same afternoon on unchanged code. A test that cannot tell
-    a breakage from a thin search index is not measuring this codebase.
-
-    Call one is issued directly so its raw response can be inspected, then
-    replayed into the searcher — the real format call and validation ladder
-    still run, and only one grounded search is spent.
-    """
-    if not config.llm_config.grounded:
-        pytest.skip("grounding disabled in config — cannot verify the grounded path")
-
-    llm = config.llm_config
-    searched = LLMClient(
-        provider=llm.provider,
-        api_key=llm.api_key,
-        model=llm.model,
-        max_tokens=llm.max_tokens,
-        temperature=llm.temperature,
-        timeout=llm.timeout,
-    ).prompt(search_prompt(_LIVE_ITEM))
-
-    assert searched.text and searched.text.strip(), "grounded call returned no text"
-    assert grounding_urls(searched.raw_response), (
-        "no grounding citations returned — the search tool did not run. "
-        f"Reply was: {(searched.text or '')[:200]}"
-    )
-
-    reading = PriceSearcher(
-        llm, config.price_ctrl, logger, search_client=_Replay(searched)
-    ).price(_LIVE_ITEM, None, datetime.now().replace(microsecond=0))
-
-    assert reading.status not in {
-        PriceStatus.ERROR,
-        PriceStatus.PARSE_ERROR,
-    }, f"pipeline failed on a grounded reply: {reading.note}"
-
-    if reading.price is not None:
-        assert reading.price > 0
-        assert reading.source_url.startswith("http")
-
-
-def test_ungrounded_lookup_completes_without_error(config, logger):
-    """The un-grounded path must run cleanly on a key with no search quota.
-
-    Forces grounding off regardless of config, so this covers the fallback
-    whichever way the deployment is currently set. It asserts only that the
-    two-call pipeline completes and grades itself — an un-grounded model has
-    no live sources, so NOT_FOUND is the honest and expected result, and a
-    price is not required. ERROR/PARSE_ERROR mean the plumbing broke.
-    """
-    llm_config = replace(config.llm_config, grounded=False)
-    searcher = PriceSearcher(llm_config, config.price_ctrl, logger)
-    reading = searcher.price(_LIVE_ITEM, None, datetime.now().replace(microsecond=0))
-
-    assert reading.status not in {
-        PriceStatus.ERROR,
-        PriceStatus.PARSE_ERROR,
-    }, f"un-grounded pipeline failed: {reading.note}"
-
-    if reading.price is not None:
-        assert reading.price > 0
 
 
 def test_sheet_round_trip(config, logger, gsheet):
@@ -125,7 +28,6 @@ def test_sheet_round_trip(config, logger, gsheet):
     assert isinstance(items, list)
     for item in items:
         assert item.name.strip()
-        assert item.website.strip()
 
 
 def test_history_round_trip_survives_trailing_empty_cells(config, logger, gsheet):
@@ -134,7 +36,7 @@ def test_history_round_trip_survives_trailing_empty_cells(config, logger, gsheet
     each row, and a naive column layout would either pad missing cells with
     NaN or (if every row in the sheet is short) raise ValueError out of
     GoogleSheetInterface.read() before HistoryTab ever sees the data. A
-    not_found/error reading has both `source_url` and `note` blank — the
+    not_found reading has all nine detection cells and `note` blank — the
     realistic shape this defence has to survive — so this is the one
     assumption in the project that fakes cannot verify.
 
@@ -150,11 +52,8 @@ def test_history_round_trip_survives_trailing_empty_cells(config, logger, gsheet
     reading = PriceReading(
         timestamp=datetime(2026, 8, 20, 6, 0, 0),
         item="Integration Test Widget",
-        website="shop.example",
-        price=None,
         currency="GBP",
         status=PriceStatus.NOT_FOUND,
-        source_url="",
         note="",
     )
     try:
@@ -173,52 +72,37 @@ def test_history_round_trip_survives_trailing_empty_cells(config, logger, gsheet
         assert not read_back.isna().any().any()
         row = read_back.iloc[0]
         assert row["item"] == "Integration Test Widget"
-        assert row["website"] == "shop.example"
-        assert row["price"] == ""
-        assert row["source_url"] == ""
+        assert row["cheapest_price"] == ""
+        assert row["cheapest_site"] == ""
         assert row["note"] == ""
         assert row["status"] == "not_found"
     finally:
         _delete_tab(gsheet, _SCRATCH_HISTORY_TAB, logger)
 
 
-def test_live_market_sweep_returns_a_scored_reading(config, logger):
-    """One real UK-wide sweep. Asserts shape and plausibility, never a price.
-
-    A mainstream, widely-stocked item is chosen deliberately: the assertion
-    that the parsed source count is at least 2 is the point of this test. If
-    a routine sweep of something this common turns up only one retailer, the
-    market prompt has drifted padding-averse, and that is worth catching here
-    rather than discovering it later as a string of confidence-0.33 readings.
-    """
+def test_live_sweep_returns_three_detections(config, logger):
+    """One real sweep. Asserts shape and plausibility, never a specific price."""
     searcher = MarketSearcher(config.llm_config, config.price_ctrl, logger)
-    item = Item(name="Raspberry Pi 5 8GB", website="shop.example", market=True)
+    item = Item(name="Raspberry Pi 5 8GB")
 
     reading = searcher.price_market(item, None, datetime.now())
 
-    assert reading.website == MARKET_KEY
     assert reading.status in {
         PriceStatus.OK,
         PriceStatus.SUSPECT,
         PriceStatus.NOT_FOUND,
     }
-    if reading.price is not None:
-        assert 0 < reading.price < config.price_ctrl.max_plausible_price
-        assert reading.confidence is not None
-        assert 0.0 <= reading.confidence <= 1.0
-        assert reading.source_url.startswith("http")
-        # The reason string always starts "<n> source(s)"; n is the whole
-        # point of the sweep. A mainstream item that returns a single
-        # retailer means the prompt has drifted padding-averse, which
-        # silently guts the corroboration factor and caps every sweep at
-        # 0.33.
-        try:
-            sources = int(reading.note.split()[0])
-        except (IndexError, ValueError):
-            raise AssertionError(
-                f"could not parse source count from note: {reading.note!r}"
-            )
-        assert sources >= 2, f"sweep found only {sources} retailer(s): {reading.note}"
+    if reading.cheapest is None:
+        return
+    assert 0 < reading.cheapest.price < config.price_ctrl.max_plausible_price
+    assert reading.cheapest.site
+    assert 0.0 <= reading.confidence <= 1.0
+    if reading.best_value is not None and reading.best_rated is not None:
+        assert reading.best_value.price >= reading.cheapest.price or (
+            reading.cheapest.rating == ""
+        )
+    sources = int(reading.note.split()[0])
+    assert sources >= 2, f"sweep found only {sources} retailer(s): {reading.note}"
 
 
 def _delete_tab(gsheet, sheet_name: str, logger: logging.Logger) -> None:
