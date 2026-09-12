@@ -3,7 +3,11 @@
 import pytest
 from llmbridge.providers import ProviderRegistry
 
-from price_monitor.search.gemini_search import GeminiSearchProvider, grounding_urls
+from price_monitor.search.gemini_search import (
+    GeminiSearchProvider,
+    grounding_sites,
+    grounding_urls,
+)
 
 
 @pytest.fixture
@@ -77,3 +81,34 @@ def test_grounding_urls_tolerate_missing_metadata():
 
 def test_provider_is_registered():
     assert ProviderRegistry.get("gemini_search") is GeminiSearchProvider
+
+
+def test_grounding_sites_prefers_the_title_over_the_redirect_uri():
+    """The uri is a Vertex redirect that resembles no retailer; the title is
+    the site's own name, and is the only usable identity in the metadata."""
+    raw = {
+        "candidates": [
+            {
+                "groundingMetadata": {
+                    "groundingChunks": [
+                        {
+                            "web": {
+                                "uri": (
+                                    "https://vertexaisearch.cloud.google.com"
+                                    "/grounding-api-redirect/AbC"
+                                ),
+                                "title": "argos.co.uk",
+                            }
+                        },
+                        {"web": {"uri": "https://x/y", "title": "www.Currys.co.uk"}},
+                    ]
+                }
+            }
+        ]
+    }
+    assert grounding_sites(raw) == ["argos.co.uk", "currys.co.uk"]
+
+
+def test_grounding_sites_tolerate_missing_metadata():
+    assert grounding_sites({"candidates": [{}]}) == []
+    assert grounding_sites({}) == []

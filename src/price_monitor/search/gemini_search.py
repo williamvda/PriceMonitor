@@ -60,13 +60,34 @@ class GeminiSearchProvider(GeminiProvider):
         )
 
 
-def grounding_urls(raw: dict[str, Any]) -> list[str]:
-    """Return the source URIs Gemini cited for a grounded response, in order."""
+def _web_chunks(raw: dict[str, Any]) -> list[dict[str, Any]]:
     candidates = raw.get("candidates") or []
     if not candidates:
         return []
     chunks = candidates[0].get("groundingMetadata", {}).get("groundingChunks", [])
-    return [uri for chunk in chunks if (uri := chunk.get("web", {}).get("uri", ""))]
+    return [chunk.get("web", {}) for chunk in chunks if isinstance(chunk, dict)]
+
+
+def grounding_urls(raw: dict[str, Any]) -> list[str]:
+    """Return the source URIs Gemini cited for a grounded response, in order."""
+    return [uri for web in _web_chunks(raw) if (uri := web.get("uri", ""))]
+
+
+def grounding_sites(raw: dict[str, Any]) -> list[str]:
+    """Return the retailers Gemini cited, as site names.
+
+    Prefers each chunk's ``title``, which Gemini fills with the site's name,
+    over its ``uri`` — the URIs are Vertex redirect links that never resemble
+    the retailer's own address, so matching a product URL against them can
+    never succeed. Live sweeps scored every winner "uncited url" until this
+    was understood.
+    """
+    sites = []
+    for web in _web_chunks(raw):
+        title = str(web.get("title") or "").strip().lower()
+        if title:
+            sites.append(title[4:] if title.startswith("www.") else title)
+    return sites
 
 
 def was_truncated(raw: dict[str, Any]) -> bool:

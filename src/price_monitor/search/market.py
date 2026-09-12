@@ -20,7 +20,11 @@ from price_monitor.app_config import LLMConfig, PriceCtrl
 from price_monitor.models import Item, PriceReading, PriceStatus
 from price_monitor.search.confidence import Candidate, score
 from price_monitor.search.detections import select, to_detection
-from price_monitor.search.gemini_search import grounding_urls, was_truncated
+from price_monitor.search.gemini_search import (
+    grounding_sites,
+    grounding_urls,
+    was_truncated,
+)
 from price_monitor.search.json_extract import extract_json
 from price_monitor.search.prompts import market_format_prompt, market_prompt
 from price_monitor.search.searcher import FORMAT_PROVIDER, retrying
@@ -114,6 +118,11 @@ class MarketSearcher:
             )
 
         urls = grounding_urls(searched.raw_response)
+        sites = grounding_sites(searched.raw_response)
+        # Logged while the grounding metadata's shape is still being pinned
+        # down: it is the only way to see what a citation actually looked like
+        # on a sweep that has already happened.
+        self.logger.info(f"Grounded on {len(sites)} site(s): {sites[:6]}")
 
         try:
             formatted = retrying(
@@ -139,6 +148,7 @@ class MarketSearcher:
             timestamp,
             last_price,
             urls,
+            sites,
             truncated,
             _declared_count(searched.text),
         )
@@ -150,6 +160,7 @@ class MarketSearcher:
         timestamp: datetime,
         last_price: float | None,
         urls: list[str],
+        sites: list[str],
         truncated: bool = False,
         declared: int | None = None,
     ) -> PriceReading:
@@ -174,7 +185,7 @@ class MarketSearcher:
         # `is`, not `==`: two candidates can share every field value, and only
         # the object actually chosen carries the right VAT note.
         winner_vat_note = next(n for c, n in pairs if c is cheapest_pick)
-        value, reason = score(candidates, cheapest_pick, urls)
+        value, reason = score(candidates, cheapest_pick, sites)
 
         status = PriceStatus.OK
         note = reason
@@ -218,6 +229,11 @@ class MarketSearcher:
         its prices.
         """
         if declared is None:
+            # Inert and passing look identical on the sheet, so say which.
+            self.logger.info(
+                "Search report carried no 'END: <n> retailers' line, so the "
+                "conversion check is disabled for this sweep."
+            )
             return ""
         converted = payload.get("candidates")
         kept = len(converted) if isinstance(converted, list) else 0

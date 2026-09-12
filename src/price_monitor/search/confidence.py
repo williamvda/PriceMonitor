@@ -51,7 +51,7 @@ class Candidate:
 
 
 def score(
-    candidates: list[Candidate], winner: Candidate | None, cited_urls: list[str]
+    candidates: list[Candidate], winner: Candidate | None, cited_sites: list[str]
 ) -> tuple[float, str]:
     """Score the sweep in ``[0, 1]`` and explain the score in one line.
 
@@ -70,7 +70,7 @@ def score(
 
     corroboration = min(len(candidates) / _TARGET_SOURCES, 1.0)
     outlier, outlier_reason = _outlier(candidates, winner)
-    sourcing, sourcing_reason = _sourcing(winner, cited_urls)
+    sourcing, sourcing_reason = _sourcing(winner, cited_sites)
 
     value = round(corroboration * outlier * sourcing, 2)
     plural = "" if len(candidates) == 1 else "s"
@@ -94,19 +94,31 @@ def _outlier(candidates: list[Candidate], winner: Candidate) -> tuple[float, str
     return (ratio - _OUTLIER_ZERO) / (_OUTLIER_FULL - _OUTLIER_ZERO), gap
 
 
-def _sourcing(winner: Candidate, cited_urls: list[str]) -> tuple[float, str]:
+def _sourcing(winner: Candidate, cited_sites: list[str]) -> tuple[float, str]:
     """Did the model read the winner's price, or recall it?
 
     Compared by domain, not by exact URL. The model quotes a product page in
     its prose while the grounding metadata cites whatever it actually fetched,
-    so the two agree on the retailer far more often than on the string — a
-    `www.`, a trailing slash or a tracking parameter is enough to make an exact
-    match fail on a page that was genuinely read.
+    Compared against the site *names* Gemini cites, not its URIs: those are
+    Vertex redirect links that never resemble the retailer's own address, so
+    matching a product URL against them cannot succeed at all. Live sweeps
+    scored every winner "uncited url" until that was understood.
     """
     url = winner.url.strip()
     if not url.startswith(("http://", "https://")):
         return 0.3, "no source url"
     domain = supplier_domain(url)
-    if domain and domain in {supplier_domain(u) for u in cited_urls if u}:
+    if domain and any(_same_site(domain, site) for site in cited_sites):
         return 1.0, "cited"
     return 0.6, "uncited url"
+
+
+def _same_site(domain: str, cited: str) -> bool:
+    """True when a cited site name refers to the winner's domain.
+
+    Gemini cites a site by name, which may be the bare domain or only its
+    first label, so an equality test alone misses "Argos" against
+    "argos.co.uk".
+    """
+    cited = cited.strip().lower()
+    return bool(cited) and (domain == cited or domain.startswith(f"{cited}."))

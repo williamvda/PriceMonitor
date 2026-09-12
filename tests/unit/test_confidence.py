@@ -6,9 +6,11 @@ from price_monitor.search.confidence import Candidate, score
 from price_monitor.search.detections import select
 
 CITED = "https://argos.co.uk/widget"
+# Gemini cites a site by name, not by the product URL the model quotes.
+CITED_SITE = "argos.co.uk"
 
 
-def _score(candidates: list[Candidate], cited_urls: list[str]) -> tuple[float, str]:
+def _score(candidates: list[Candidate], cited_sites: list[str]) -> tuple[float, str]:
     """Score a sweep the way market.py does.
 
     The winner is chosen by `select`, not re-derived here — that coupling is
@@ -16,7 +18,7 @@ def _score(candidates: list[Candidate], cited_urls: list[str]) -> tuple[float, s
     it the same candidate the sheet would record.
     """
     _, cheapest, _ = select(candidates, 0.05)
-    return score(candidates, cheapest, cited_urls)
+    return score(candidates, cheapest, cited_sites)
 
 
 def _candidate(price: float, **overrides) -> Candidate:
@@ -52,7 +54,7 @@ def _clustered(n: int, **winner_overrides) -> list[Candidate]:
     ],
 )
 def test_scores_depend_on_the_sweep_not_the_retailer(candidates, expected):
-    assert _score(candidates, [CITED])[0] == expected
+    assert _score(candidates, [CITED_SITE])[0] == expected
 
 
 def test_a_poorly_rated_retailer_no_longer_lowers_confidence():
@@ -63,19 +65,19 @@ def test_a_poorly_rated_retailer_no_longer_lowers_confidence():
     'large retailer people complain about' from 'shop to avoid', so it is
     displayed rather than scored.
     """
-    good = _score(_clustered(4, rating=4.8), [CITED])[0]
-    bad = _score(_clustered(4, rating=1.4, rating_count=33904), [CITED])[0]
+    good = _score(_clustered(4, rating=4.8), [CITED_SITE])[0]
+    bad = _score(_clustered(4, rating=1.4, rating_count=33904), [CITED_SITE])[0]
     assert good == bad == 1.00
 
 
 def test_score_never_leaves_the_unit_interval():
     for rating in (0.0, 1.0, 2.0, 3.0, 4.0, 5.0, None):
-        value = _score(_clustered(4, rating=rating, rating_count=900), [CITED])[0]
+        value = _score(_clustered(4, rating=rating, rating_count=900), [CITED_SITE])[0]
         assert 0.0 <= value <= 1.0
 
 
 def test_the_reason_no_longer_mentions_a_rating():
-    _, reason = _score(_clustered(4), [CITED])
+    _, reason = _score(_clustered(4), [CITED_SITE])
     assert "rated" not in reason
     assert "4 sources" in reason
 
@@ -85,39 +87,39 @@ def test_a_winner_well_under_the_others_median_is_punished():
     # 0.4545. The ratio is never rounded: the outlier factor is a continuous
     # slide, and only the final product is rounded, once.
     others = [_candidate(p, url=f"https://o{p}.co.uk/w") for p in (200.0, 220.0, 240.0)]
-    assert _score([_candidate(100.0)] + others, [CITED])[0] == 0.14
+    assert _score([_candidate(100.0)] + others, [CITED_SITE])[0] == 0.14
 
 
 def test_a_modest_gap_under_the_median_is_only_partly_punished():
     # Winner 100 against others at 140/143/146 -> median 143, ratio 0.70.
     others = [_candidate(p, url=f"https://o{p}.co.uk/w") for p in (140.0, 143.0, 146.0)]
-    assert _score([_candidate(100.0)] + others, [CITED])[0] == 0.75
+    assert _score([_candidate(100.0)] + others, [CITED_SITE])[0] == 0.75
 
 
 def test_a_sole_source_is_not_punished_twice():
     """n=1 has nothing to compare against, so only corroboration penalises it."""
-    assert _score([_candidate(100.0)], [CITED])[0] == 0.33
+    assert _score([_candidate(100.0)], [CITED_SITE])[0] == 0.33
 
 
 def test_an_uncited_url_scores_below_a_cited_one():
-    cited = _score(_clustered(4), [CITED])[0]
-    uncited = _score(_clustered(4), ["https://elsewhere.example/x"])[0]
+    cited = _score(_clustered(4), [CITED_SITE])[0]
+    uncited = _score(_clustered(4), ["elsewhere.example"])[0]
     assert uncited < cited
     assert uncited == 0.6
 
 
 def test_a_winner_with_no_url_scores_lowest_on_sourcing():
-    assert _score(_clustered(4, url=""), [CITED])[0] == 0.3
+    assert _score(_clustered(4, url=""), [CITED_SITE])[0] == 0.3
 
 
 def test_the_reason_names_every_factor():
-    _, reason = _score(_clustered(4), [CITED])
+    _, reason = _score(_clustered(4), [CITED_SITE])
     assert "4 sources" in reason
     assert "cited" in reason
 
 
 def test_an_empty_candidate_set_scores_zero():
-    assert _score([], [CITED]) == (0.0, "no candidates")
+    assert _score([], [CITED_SITE]) == (0.0, "no candidates")
 
 
 def test_rating_label_renders_for_the_sheet():
@@ -139,7 +141,7 @@ def test_the_scored_winner_is_the_one_the_sheet_records():
     _, cheapest, _ = select([thin, trusted], 0.05)
     assert cheapest is trusted
 
-    _, reason = score([thin, trusted], cheapest, ["https://trusted.co.uk/w"])
+    _, reason = score([thin, trusted], cheapest, ["trusted.co.uk"])
     assert "cited" in reason and "uncited" not in reason
 
 
@@ -158,12 +160,30 @@ def test_a_citation_matches_on_the_retailer_not_the_exact_url():
         "https://argos.co.uk/product/1234567?clickSR=slp",
     ):
         winner = _candidate(100.0, url=quoted)
-        _, reason = score([winner], winner, ["https://argos.co.uk/browse/widgets"])
+        _, reason = score([winner], winner, [CITED_SITE])
         assert reason.endswith("cited"), quoted
         assert "uncited" not in reason
 
 
 def test_a_different_retailer_is_still_uncited():
     winner = _candidate(100.0, url="https://elsewhere.example/p")
-    _, reason = score([winner], winner, ["https://argos.co.uk/browse/widgets"])
+    _, reason = score([winner], winner, [CITED_SITE])
+    assert "uncited url" in reason
+
+
+def test_a_citation_by_bare_brand_name_still_counts():
+    """Gemini fills a chunk's title with the site's name, which is sometimes
+    only the first label — "Argos" for argos.co.uk."""
+    winner = _candidate(100.0, url="https://www.argos.co.uk/product/123")
+    _, reason = score([winner], winner, ["argos"])
+    assert reason.endswith("cited")
+
+
+def test_a_redirect_uri_never_counts_as_a_citation():
+    """The live failure: Gemini's groundingChunks carry Vertex redirect links,
+    which resemble no retailer. Matching against those is what pinned every
+    sweep's sourcing factor at 0.6."""
+    winner = _candidate(100.0, url="https://argos.co.uk/product/123")
+    redirect = "vertexaisearch.cloud.google.com"
+    _, reason = score([winner], winner, [redirect])
     assert "uncited url" in reason
