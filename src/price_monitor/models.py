@@ -12,6 +12,13 @@ boundary, which is why they live here rather than in any one layer.
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from urllib.parse import urlparse
+
+
+def supplier_domain(url: str) -> str:
+    """The bare domain of ``url``, as a :class:`Detection`'s ``site`` value."""
+    netloc = urlparse(url.strip()).netloc.lower()
+    return netloc[4:] if netloc.startswith("www.") else netloc
 
 
 class PriceStatus(str, Enum):

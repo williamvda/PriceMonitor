@@ -141,3 +141,29 @@ def test_the_scored_winner_is_the_one_the_sheet_records():
 
     _, reason = score([thin, trusted], cheapest, ["https://trusted.co.uk/w"])
     assert "cited" in reason and "uncited" not in reason
+
+
+def test_a_citation_matches_on_the_retailer_not_the_exact_url():
+    """Observed in production: every live sweep scored "uncited url".
+
+    The model quotes a product page in its prose; the grounding metadata cites
+    whatever it actually fetched. Exact-string matching therefore failed on
+    pages that had genuinely been read, capping every sweep's sourcing factor
+    at 0.6 and — at the default threshold — silencing any item with fewer than
+    three retailers. Each URL below is the same retailer as the citation.
+    """
+    for quoted in (
+        "https://www.argos.co.uk/product/1234567",
+        "https://argos.co.uk/product/1234567/",
+        "https://argos.co.uk/product/1234567?clickSR=slp",
+    ):
+        winner = _candidate(100.0, url=quoted)
+        _, reason = score([winner], winner, ["https://argos.co.uk/browse/widgets"])
+        assert reason.endswith("cited"), quoted
+        assert "uncited" not in reason
+
+
+def test_a_different_retailer_is_still_uncited():
+    winner = _candidate(100.0, url="https://elsewhere.example/p")
+    _, reason = score([winner], winner, ["https://argos.co.uk/browse/widgets"])
+    assert "uncited url" in reason

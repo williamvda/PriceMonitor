@@ -19,7 +19,7 @@ from price_monitor.app_config import LLMConfig, PriceCtrl
 from price_monitor.models import Item, PriceReading, PriceStatus
 from price_monitor.search.confidence import Candidate, score
 from price_monitor.search.detections import select, to_detection
-from price_monitor.search.gemini_search import grounding_urls
+from price_monitor.search.gemini_search import grounding_urls, was_truncated
 from price_monitor.search.json_extract import extract_json
 from price_monitor.search.prompts import market_format_prompt, market_prompt
 from price_monitor.search.searcher import FORMAT_PROVIDER, retrying
@@ -91,6 +91,14 @@ class MarketSearcher:
                 item, timestamp, PriceStatus.PARSE_ERROR, "empty search reply"
             )
 
+        truncated = was_truncated(searched.raw_response)
+        if truncated:
+            self.logger.warning(
+                f"Market search for '{item.name}' hit max_tokens — the report "
+                f"was cut off, so retailers it had not yet named are missing "
+                f"from this sweep. Raise llm_config.max_tokens."
+            )
+
         urls = grounding_urls(searched.raw_response)
 
         try:
@@ -111,7 +119,7 @@ class MarketSearcher:
             self.logger.warning(f"Unparseable market reply for '{item.name}': {exc}")
             return self._failed(item, timestamp, PriceStatus.PARSE_ERROR, str(exc))
 
-        return self._rank(payload, item, timestamp, last_price, urls)
+        return self._rank(payload, item, timestamp, last_price, urls, truncated)
 
     def _rank(
         self,
@@ -120,6 +128,7 @@ class MarketSearcher:
         timestamp: datetime,
         last_price: float | None,
         urls: list[str],
+        truncated: bool = False,
     ) -> PriceReading:
         pairs = self._candidates(payload)
         if not pairs:
@@ -146,6 +155,10 @@ class MarketSearcher:
 
         status = PriceStatus.OK
         note = reason
+        if truncated:
+            # On the sheet, not just in the log: a sweep that lost candidates
+            # to the token ceiling looks identical to a thorough one.
+            note = f"{note}; report truncated, retailers may be missing"
         if winner_vat_note:
             note = f"{note}; {winner_vat_note}"
         if last_price is not None and last_price > 0:

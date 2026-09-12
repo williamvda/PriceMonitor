@@ -31,7 +31,10 @@ class LLMConfig:
     grounded: bool = True
     provider: str = "gemini_search"
     model: str = "gemini-3.7-flash"
-    max_tokens: int = 1024
+    # The grounded call writes a prose report naming every retailer it found,
+    # each with a price, a URL, a rating and a review count. 1024 was enough
+    # for one supplier; a market sweep runs out and gets cut off silently.
+    max_tokens: int = 2048
     temperature: float = 0.0
     timeout: float = 60.0
 

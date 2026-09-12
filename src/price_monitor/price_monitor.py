@@ -118,6 +118,7 @@ class PriceMonitor:
         if not items:
             self.logger.info("No items to price")
             return
+        self._warn_orphaned_history(items)
 
         due = items if force else self._due_for_refresh(items)
         if skipped := len(items) - len(due):
@@ -130,6 +131,25 @@ class PriceMonitor:
 
         self.logger.info(f"Pricing {len(due)} items")
         self._price_and_record("update", due)
+
+    def _warn_orphaned_history(self, items: list[Item]) -> None:
+        """Warn about recorded history no item on the sheet claims any more.
+
+        The item name is the only identity there is, so editing one on the
+        Items tab does not rename its history — it starts the item over with
+        no min, no mean and no drop detection until it has swept
+        ``min_readings`` times again, while the old rows sit there keyed to a
+        name nothing references. That is indistinguishable from a deletion, so
+        it cannot be reconciled automatically; it can only be pointed out.
+        """
+        orphans = sorted(self.history.known_items() - {item.name for item in items})
+        if orphans:
+            self.logger.warning(
+                f"{len(orphans)} item(s) have history but are no longer on the "
+                f"Items tab, so their statistics have restarted: "
+                f"{', '.join(repr(name) for name in orphans)}. If you renamed "
+                f"one, rename it back or clear its old rows from the history."
+            )
 
     def _due_for_refresh(self, items: list[Item]) -> list[Item]:
         """Items never checked, or last checked over ``refresh_rate_h`` ago."""

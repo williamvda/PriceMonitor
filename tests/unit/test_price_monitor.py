@@ -635,3 +635,30 @@ def test_a_confident_drop_is_announced(logger):
     monitor.update(force=True)
 
     assert any("argos.co.uk" in message for message in _drops(notifier))
+
+
+def test_a_renamed_item_is_warned_about_not_silently_restarted(
+    logger, searcher, caplog
+):
+    """The item name is the only identity there is, so a rename orphans the
+    old history and restarts min/mean. It cannot be reconciled — a renamed
+    item and a deleted one look identical — so it must at least be said."""
+    sheet = _sheet_with_history(
+        [_history_row("WeeRide Safe Deluxe", datetime.now() - _STALE)],
+        ["WeeRide Front Safe Deluxe"],
+    )
+    with caplog.at_level(logging.WARNING):
+        _monitor(sheet, searcher, logger).update()
+
+    warning = "\n".join(r.message for r in caplog.records)
+    assert "WeeRide Safe Deluxe" in warning
+    assert "no longer on the" in warning
+
+
+def test_no_orphan_warning_when_every_item_still_matches(logger, searcher, caplog):
+    sheet = _sheet_with_history(
+        [_history_row("Widget", datetime.now() - _STALE)], ["Widget"]
+    )
+    with caplog.at_level(logging.WARNING):
+        _monitor(sheet, searcher, logger).update()
+    assert "no longer on the" not in "\n".join(r.message for r in caplog.records)

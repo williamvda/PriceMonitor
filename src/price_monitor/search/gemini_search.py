@@ -69,4 +69,16 @@ def grounding_urls(raw: dict[str, Any]) -> list[str]:
     return [uri for chunk in chunks if (uri := chunk.get("web", {}).get("uri", ""))]
 
 
+def was_truncated(raw: dict[str, Any]) -> bool:
+    """True when Gemini stopped at ``max_tokens`` rather than finishing.
+
+    A truncated reply still carries text, so it is indistinguishable from a
+    complete one unless the finish reason is read. For a sweep that means the
+    retailers the model had not yet named are simply absent, with every
+    downstream number looking healthy.
+    """
+    candidates = raw.get("candidates") or []
+    return bool(candidates) and candidates[0].get("finishReason") == "MAX_TOKENS"
+
+
 ProviderRegistry.register("gemini_search", GeminiSearchProvider)

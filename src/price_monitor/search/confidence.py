@@ -9,6 +9,8 @@ the part of an LLM's output least worth trusting.
 from dataclasses import dataclass
 from statistics import median
 
+from price_monitor.models import supplier_domain
+
 # A rating on fewer reviews than this is noise, and reads as unknown.
 MIN_RATING_COUNT = 50
 
@@ -93,9 +95,18 @@ def _outlier(candidates: list[Candidate], winner: Candidate) -> tuple[float, str
 
 
 def _sourcing(winner: Candidate, cited_urls: list[str]) -> tuple[float, str]:
+    """Did the model read the winner's price, or recall it?
+
+    Compared by domain, not by exact URL. The model quotes a product page in
+    its prose while the grounding metadata cites whatever it actually fetched,
+    so the two agree on the retailer far more often than on the string — a
+    `www.`, a trailing slash or a tracking parameter is enough to make an exact
+    match fail on a page that was genuinely read.
+    """
     url = winner.url.strip()
     if not url.startswith(("http://", "https://")):
         return 0.3, "no source url"
-    if url in {u.strip() for u in cited_urls if u}:
+    domain = supplier_domain(url)
+    if domain and domain in {supplier_domain(u) for u in cited_urls if u}:
         return 1.0, "cited"
     return 0.6, "uncited url"

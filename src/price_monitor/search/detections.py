@@ -6,9 +6,7 @@ once real sweeps are visible, and tuning them should cost a unit test rather
 than a billed API call.
 """
 
-from urllib.parse import urlparse
-
-from price_monitor.models import Detection
+from price_monitor.models import Detection, supplier_domain
 from price_monitor.search.confidence import Candidate
 
 
@@ -69,9 +67,3 @@ def to_detection(candidate: Candidate | None) -> Detection | None:
         site=supplier_domain(candidate.url),
         rating=candidate.rating_label,
     )
-
-
-def supplier_domain(url: str) -> str:
-    """The bare domain of ``url``, as a :class:`Detection`'s ``site`` value."""
-    netloc = urlparse(url.strip()).netloc.lower()
-    return netloc[4:] if netloc.startswith("www.") else netloc

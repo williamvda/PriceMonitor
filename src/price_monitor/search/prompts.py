@@ -13,8 +13,11 @@ _MARKET_TEMPLATE = """Find the current UK price of this product across retailers
 
 Product: {item}
 
-Find current UK prices for this product from as many different UK retailers as
-you can — aim for three to six. For each retailer report:
+Search thoroughly and list every UK retailer you can find selling it. The
+point of the search is to find the cheapest, so do not stop at the first few
+results — a retailer further down may be the cheap one. Look beyond the
+obvious: large marketplaces, specialist retailers and the manufacturer's own
+shop all count. For each retailer report:
 - the retailer's name
 - the price shown right now, with its currency
 - whether that price includes VAT (sales tax)
@@ -28,8 +31,11 @@ find a rating, say unknown — do not estimate one.
 
 Only list the same product — the same model and variant. Do not list
 accessories, bundles, multipacks, refurbished or used items unless the product
-name asks for one. Do not guess a price; list only prices you actually saw. If
-you can find it at only one retailer, list only that one."""
+name asks for one. Do not guess a price; list only prices you actually saw.
+
+If, after searching properly, the product really is sold by only one retailer,
+list only that one — but do not pad the list with retailers you did not check,
+and do not stop searching early just because you already have a few."""
 
 _MARKET_FORMAT_TEMPLATE = (
     """Convert the report below into one JSON object and nothing else.

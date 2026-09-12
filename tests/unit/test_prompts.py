@@ -4,15 +4,25 @@ from price_monitor.models import Item
 from price_monitor.search.prompts import market_format_prompt, market_prompt
 
 
-def test_market_prompt_names_the_product_and_asks_for_a_set():
+def test_market_prompt_names_the_product_and_asks_for_breadth():
+    """The old wording capped ambition at "three to six" and live sweeps
+    returned two or three. It now asks for every retailer it can find and
+    says why — the cheapest may be further down the results."""
     prompt = market_prompt(Item(name="Widget 3000"))
     assert "Widget 3000" in prompt
-    assert "three to six" in prompt
+    assert "every UK retailer you can find" in prompt
+    assert "do not stop at the first few" in prompt
+    assert "three to six" not in prompt
 
 
-def test_market_prompt_permits_a_single_retailer():
-    """Without this the model pads the list, which corrupts the agreement score."""
-    assert "only one retailer" in market_prompt(Item(name="Widget"))
+def test_market_prompt_permits_a_single_retailer_without_excusing_a_short_search():
+    """Honesty about a genuinely single-source product must not double as
+    permission to stop early — the padding guard and the breadth instruction
+    have to coexist."""
+    prompt = market_prompt(Item(name="Widget"))
+    assert "only one retailer" in prompt
+    assert "do not pad the list" in prompt
+    assert "do not stop searching early" in prompt
 
 
 def test_market_prompt_forbids_estimating_a_rating():
