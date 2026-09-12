@@ -1,16 +1,18 @@
 # PriceMonitor
 
-PriceMonitor watches a list of products in a Google Sheet and records their
-price over time, using a search-grounded LLM to look each one up. You add a
-row, PriceMonitor finds the price, and both a running history and a
-per-item summary are written back to the sheet — no scraper to maintain per
+PriceMonitor watches a list of products in a Google Sheet and, on every run,
+searches UK retailers generally rather than checking one shop you named. For
+each item it reports three answers — the best-rated retailer, the cheapest,
+and a best-value compromise between them — using a search-grounded LLM to do
+the finding. You add a row with just the product's name; PriceMonitor writes
+back a running history and a per-item summary, no scraper to maintain per
 site.
 
 ## How it works
 
 Two independent timers drive the controller:
 
-- **Full refresh** (`refresh_rate_h`, default 6 hours) — prices every item on
+- **Full refresh** (`refresh_rate_h`, default 24 hours) — prices every item on
   the Items tab and rewrites the summary.
 - **Poll** (`poll_rate_m`, default 5 minutes) — checks whether the sheet has
   changed since the last check and, if so, prices only the items that are new
@@ -39,19 +41,86 @@ This is deliberate: Gemini's search grounding and structured/JSON output are
 unreliable together, so grounding is used only for the call that needs to
 search, and the JSON call runs with grounding switched off.
 
-### The market sweep
+### Every item, one sweep
 
-An item with `market` set to `yes` gets a second, independent lookup each
-run: a UK-wide sweep that asks what the item costs across retailers
-generally, rather than at your one tracked supplier. It is recorded as its
-own history row under the website `market`, so it keeps its own mean, its
-own baseline and its own drop bands, entirely separate from the tracked
-supplier's.
+Each run does one thing per item: a UK-wide sweep that asks what the product
+costs across retailers generally, not at one shop you named. There is no
+per-supplier lookup any more — the sweep is the only kind of lookup
+PriceMonitor makes, and its cost (one billed search) is the cost of pricing
+that item at all.
 
 Each sweep asks for several retailers, not one — the others exist to make
-the confidence score possible, not to be recorded. The cheapest candidate
-that is in stock, priced in the configured currency, and not rated below 3.0
-wins.
+the confidence score possible and to give the three detections below
+something to choose between. A candidate must be in stock, priced in the
+configured currency, and pass validation to be counted at all.
+
+### The three detections
+
+A sweep answers three separate questions, each recorded as its own price,
+site and rating:
+
+| Detection | Question it answers |
+| --- | --- |
+| **Best-rated** | Of the retailers with a trustworthy rating, which is rated highest? |
+| **Cheapest** | Of every candidate that survived, which is cheapest? |
+| **Best value** | Of the rated retailers, which is the best compromise between price and rating? |
+
+Only the cheapest series is tracked over time — `min`, `mean` and drop
+notifications all run against `cheapest_price` alone, because it is the one
+quantity with a meaningful trend. The best-rated retailer's price says more
+about that retailer than about the market, and the best-value pick moves
+with whichever candidates a given sweep happened to return, so neither would
+give a stable series worth comparing against itself.
+
+A drop is only announced once an item has **three** recorded sweeps — below
+that the mean tracks jitter rather than a settled price, so a "drop" against
+it would say nothing. At the default 24-hour refresh that means a newly added
+item stays quiet for its first three days. Lower `refresh_rate_h` if you want
+a new item to start reporting sooner, remembering that each sweep is a billed
+search.
+
+#### The best-value rule
+
+Best value is computed only over *rated* candidates, using the cheapest
+rated one as the baseline. A candidate rated higher than the baseline
+qualifies when its price premium fits inside a budget its rating gain earns:
+each rating point above the baseline is worth spending up to
+`rating_premium_pct` (default `0.05`, i.e. 5%) of the baseline price. Among
+the candidates that qualify, the highest-rated one wins; if none qualify,
+the baseline itself is the answer — "nothing better-rated is worth the
+money" is a real result, not a failure.
+
+Worked example, at the default `rating_premium_pct` of `0.05`:
+
+| Retailer | Price | Rating |
+| --- | --- | --- |
+| A (unrated) | £85 | — |
+| B | £100 | 4.0 |
+| C | £101 | 4.4 |
+| D | £110 | 4.8 |
+
+B is the cheapest *rated* candidate, so it is the baseline: £100 at 4.0.
+Each rating point above 4.0 is worth up to £5 (5% of £100):
+
+- C is 0.4 points above the baseline, earning a budget of £2. Its actual
+  premium is £1, so it qualifies.
+- D is 0.8 points above, earning a budget of £4. Its actual premium is £10,
+  so it does not qualify.
+
+C is the only qualifier, so it wins best value. The sweep's three detections
+end up as: best-rated = D (£110, 4.8), cheapest = A (£85, unrated), best
+value = C (£101, 4.4).
+
+Notice that `value_price` (£101) is *higher* than `cheapest_price` (£85).
+This is expected, not a bug — it is the single most likely thing to be
+reported as one. The baseline for the best-value rule is the cheapest
+**rated** candidate, because an unrated baseline has no rating to improve
+on; treating an unrated price as rating zero would make every rated
+retailer look like a bargain worth a large premium, which inverts the
+rule's purpose. So whenever the overall cheapest retailer is unrated,
+`value_price` can exceed `cheapest_price` — you are paying a premium for a
+known retailer over an unknown one, which is the point of the column
+existing.
 
 #### What confidence means
 
@@ -59,67 +128,71 @@ wins.
 is the best UK price" — not "was this number read correctly". A sweep can
 return a confident, well-formed, cheap price that turns out to belong to an
 accessory, a used unit, or the wrong variant; confidence is the signal that
-tells those two situations apart. It is built from four factors in `[0, 1]`,
+tells those two situations apart. It is built from three factors in `[0, 1]`,
 **multiplied together**:
 
 | Factor | Full marks | Penalised when |
 | --- | --- | --- |
 | Corroboration | three or more retailers found | fewer — a single hit is one shop found, not a market surveyed |
-| Agreement | the winner is within 20% of the others' median price | it sits far below them, which usually means the wrong variant, an accessory, or a used unit |
+| Agreement | the cheapest candidate is within 20% of the others' median price | it sits far below them, which usually means the wrong variant, an accessory, or a used unit |
 | Sourcing | the winning URL is one the model actually cited | it is uncited, or there is no URL at all |
-| Reputation | the retailer is rated 4.0 or better | it is rated lower, down to a 3.0 floor; an unrated retailer sits neutral rather than being punished |
 
 Because the factors **multiply** rather than average, one bad signal drags
 the whole score down whatever the others say. That is deliberate for a
 number whose only job is to catch mistakes, not to reward an otherwise-good
 sweep.
 
-The reputation factor is worth a closer look, because it is the one most
-likely to be mistaken for a bug. It is a **shoulder, not a cliff**: it stops
-penalising at a rating of 4.0 and slides down linearly to a floor of 3.0,
-below which a retailer is dropped from the sweep entirely before scoring
-ever happens. A hard cutoff at 4.0 would sit right on top of several UK
-majors — Argos (4.1), Currys (4.4), John Lewis (4.0) — so a fraction of a
-point's movement in a public rating could flip a result in or out of your
-sheet between sweeps for no reason connected to price. The shoulder degrades
-confidence smoothly instead, and the `rating` column shows you the number
-that drove it. A retailer with no rating at all, or too few reviews to mean
-anything, sits neutral rather than being punished for being unrated.
+The `note` column always explains the score, so a low confidence is never a
+mystery you have to re-run the lookup to understand, e.g. `3 sources,
+winner 8% under median, cited`.
 
-A reading below `market_min_confidence` (default `0.5`) is still recorded,
-still updates `best_price`, and still counts toward the market mean — it
-simply does not trigger a drop notification, and the suppression is logged
-so a repeatedly-gated item is visible rather than silently quiet. This
-matters in one specific way: **corroboration alone caps a single-source
-sweep at 0.33**, whatever else is true of it — a perfect price from a
-perfectly-rated retailer that no one else stocks still scores 0.33. With the
-default threshold at 0.5, that means an item only one UK retailer stocks
-will *never* announce a market drop, however much its price falls. This is
-expected behaviour, not a defect — the column is meant to answer "what's the
-best price across all UK suppliers", and one shop answering is not a market.
-If you deliberately track such niche items, lower `market_min_confidence` to
-about 0.3 rather than changing anything about the scorer itself.
+#### Ratings are shown, not scored
 
-The `note` column on a market row always explains the score, so a low
-confidence is never a mystery you have to re-run the lookup to understand,
-e.g. `3 sources, winner 8% under median, cited, rated 4.4`.
+An earlier version of this scorer included a reputation factor that
+penalised retailers below a rating threshold. That factor is gone.
+Trustpilot ratings cannot distinguish "an enormous retailer that a lot of
+people happen to complain about" from "a shop you should avoid" — Amazon UK
+sits at 1.4 out of 5 from 33,904 Trustpilot reviews, a number driven by
+delivery-adjacent complaints and review volume, not by whether Amazon is a
+legitimate place to buy something. Scoring that number would have excluded
+Amazon from every sweep it appeared in, which is the wrong outcome for a
+scorer meant to catch fabricated prices, not to grade customer service.
 
+So a rating is shown against every detection — `rated_rating`,
+`cheapest_rating`, `value_rating` — for you to read and judge, but it plays
+no part in `confidence`. A rating needs at least 50 reviews behind it to be
+trusted at all; fewer than that, or none found, and the column is left
+blank rather than guessed at.
+
+A reading below `min_confidence` (default `0.5`) is still recorded, still
+updates every column, still counts toward the cheapest mean — it simply
+does not trigger a drop notification, and the suppression is logged so a
+repeatedly-gated item is visible rather than silently quiet. This matters
+in one specific way: **corroboration alone caps a single-source sweep at
+0.33**, whatever else is true of it — a perfect price from a single
+retailer that no one else stocks still scores 0.33. With the default
+threshold at 0.5, that means an item only one UK retailer stocks will
+*never* announce a price drop, however much its price falls. This is
+expected behaviour, not a defect — the column is meant to answer "what's
+the best price across all UK suppliers", and one shop answering is not a
+market. If you deliberately track such niche items, lower `min_confidence`
+to about 0.3 rather than changing anything about the scorer itself.
 
 #### When a sweep finds only one retailer
 
 The `sources` column counts the retailers a sweep actually found — meaning
-ones that survived every check: in stock, priced in your currency, and not
-below the reputation floor. A model that names five retailers of which four
-are out of stock leaves `sources` at 1, because one shop is all that can
-actually sell you the thing.
+ones that survived every check: in stock, priced in your currency, and
+validated. A model that names five retailers of which four are out of
+stock leaves `sources` at 1, because one shop is all that can actually
+sell you the thing.
 
 A `1` here is worth acting on. It caps confidence at 0.33, which with the
-default `market_min_confidence` means that item will never announce a drop —
-so the sweep is costing you a billed search every run and can never tell you
-anything. Usually it means the product name is too specific or too obscure to
-match across retailers. Either broaden the name in the `item` column, point
-`website` at a supplier you actually want tracked and leave the sweep to do
-less work, or turn `market` off for that row.
+default `min_confidence` means that item will never announce a drop — so
+the sweep is costing you a billed search every run and can never tell you
+anything. Usually it means the product name is too specific or too obscure
+to match across retailers — broadening the name in the `item` column is the
+first thing to try. Failing that, lower `min_confidence` if you want to keep
+tracking such a niche item anyway.
 
 Sort or filter the Items tab on `sources`, or conditional-format `=1`, to find
 these rows at a glance. A blank means the item has never been swept; a `0`
@@ -133,53 +206,75 @@ and `history_sheet` in `price_ctrl` (`Items` and `Prices` by default).
 
 ### Items tab
 
-You own columns A through C; everything after them is rewritten on every run.
+Column A (`item`) is yours; every column after it is rewritten on every run.
 
-| Column         | Owner  | Meaning                                                                 |
-|----------------|--------|--------------------------------------------------------------------------|
-| `item`                  | you  | The product name, used for display and as part of its identity.        |
-| `website`               | you  | Either a bare domain (e.g. `shop.example`) to search, or a full product page URL to read directly. |
-| `market`                | you  | `yes` (also `y`, `true`, or `1`, case-insensitive) to also sweep UK retailers generally for this item on every run. Blank, or anything else, means no. Each sweep costs one extra billed search — see [The market sweep](#the-market-sweep). |
-| `current`               | tool | Most recent successfully-priced value.                                 |
-| `min`                   | tool | Lowest price seen.                                                     |
-| `mean`                  | tool | Mean of all successfully-priced values.                                |
-| `last_checked`          | tool | Timestamp of the most recent attempt, successful or not. Reads `never` for an item with no readings yet — never a blank cell, since a blank cell is ambiguous between "not checked yet" and "something went wrong". |
-| `best_price`            | tool | The cheapest price found by the most recent market sweep. Blank if `market` is not `yes`. |
-| `best_supplier`         | tool | The domain of the retailer behind `best_price`.                        |
-| `best_supplier_rating`  | tool | That retailer's review rating and source, e.g. `4.1 Trustpilot`; blank if unrated. |
-| `confidence`            | tool | The market sweep's confidence score, `0`–`1`. See [What confidence means](#what-confidence-means). |
-| `sources`               | tool | How many retailers the last sweep actually found — see [When a sweep finds only one retailer](#when-a-sweep-finds-only-one-retailer). Blank if never swept. |
-| `market_checked`        | tool | Timestamp of the most recent sweep attempt. Reads `never` for an item never swept — including every item with `market` left blank. |
+| Column | Owner | Meaning |
+| --- | --- | --- |
+| `item` | you | The product name — the only thing you type. |
+| `rated_price` | tool | The best-rated detection's price. Blank if nothing rated. |
+| `rated_site` | tool | Its retailer's domain. |
+| `rated_rating` | tool | Its rating and source, e.g. `4.4 Trustpilot`. |
+| `cheapest_price` | tool | The cheapest detection's price. |
+| `cheapest_site` | tool | Its retailer's domain. |
+| `cheapest_rating` | tool | Its rating; blank when that retailer is unrated. |
+| `value_price` | tool | The best-value detection's price. See [The best-value rule](#the-best-value-rule) — this can exceed `cheapest_price`. |
+| `value_site` | tool | Its retailer's domain. |
+| `value_rating` | tool | Its rating. |
+| `min` | tool | Lowest `cheapest_price` ever recorded. |
+| `mean` | tool | Mean of all recorded `cheapest_price` values. |
+| `confidence` | tool | The latest sweep's confidence score, `0`–`1`. See [What confidence means](#what-confidence-means). |
+| `sources` | tool | How many retailers the latest sweep actually found — see [When a sweep finds only one retailer](#when-a-sweep-finds-only-one-retailer). Blank if never swept. |
+| `last_checked` | tool | Timestamp of the latest sweep, any status. Reads `never` for an item never swept — never a blank cell, since a blank cell is ambiguous between "not checked yet" and "something went wrong". |
 
-Blank or duplicate `(item, website)` rows are skipped and logged, not sent
-to the LLM.
+Duplicate `item` values are skipped and logged, not sent to the LLM.
 
 ### Prices tab (history)
 
-Append-only: one row is added per item on every run that prices it,
-regardless of outcome. Columns: `timestamp`, `item`, `website`, `price`,
-`currency`, `source_url`, `note`, `confidence`, `rating`, `sources`, `status`.
+Append-only: one row is added per item on every run, regardless of outcome.
+Columns: `timestamp`, `item`, `rated_price`, `rated_site`, `rated_rating`,
+`cheapest_price`, `cheapest_site`, `cheapest_rating`, `value_price`,
+`value_site`, `value_rating`, `confidence`, `sources`, `note`, `status`.
 
-A market sweep is recorded here too, under the website `market` rather than
-your tracked supplier's domain — so an item with `market` set to `yes` gets
-two rows per run, each keeping its own history, mean and drop bands. Only
-market rows populate `confidence` and `rating`; both are blank on ordinary
-supplier rows.
+A failed sweep still gets a row — all nine detection cells, `confidence` and
+`sources` blank, `status` and usually `note` explaining what happened. Only
+`cheapest_price` feeds `min`, `mean` and drop notifications on the Items
+tab; `rated_price` and `value_price` are recorded and shown but never
+tracked over time.
 
 `status` is one of:
 
-| Status           | Meaning                                                                 |
-|------------------|--------------------------------------------------------------------------|
-| `ok`             | A price was found and looks plausible.                                 |
-| `suspect`        | A price was found, but it moved by more than `suspect_threshold` from the last recorded price — recorded, but worth a look. |
-| `not_found`      | The model could not find the product/price on the site or page.        |
-| `wrong_currency` | The price was reported in a currency other than the configured one.    |
-| `rejected`       | The reported price failed a sanity check (not a number, zero or negative, above `max_plausible_price`, etc.). |
-| `parse_error`    | The model's reply could not be parsed into the expected JSON shape.    |
-| `error`          | The lookup itself failed (network, API error, exception) before a price could even be attempted. |
+| Status        | Meaning                                                                 |
+|---------------|--------------------------------------------------------------------------|
+| `ok`          | A price was found and looks plausible.                                 |
+| `suspect`     | A price was found, but the cheapest moved by more than `suspect_threshold` from the last recorded cheapest price — recorded, but worth a look. |
+| `not_found`   | The sweep produced no usable candidate.                                |
+| `parse_error` | The model's reply could not be parsed into the expected JSON shape.    |
+| `error`       | The lookup itself failed (network, API error, exception) before a price could even be attempted. |
 
-Only `ok` and `suspect` rows carry a non-null `price`; every other status
-records `price` as blank.
+Only `ok` and `suspect` rows carry a non-blank `cheapest_price`; every other
+status leaves all three detections blank.
+
+### Migrating from the per-supplier version
+
+**The Items tab migrates itself.** `ItemsTab.read()` looks up the `item`
+column by name and ignores the stale `website` and `market` columns
+entirely; the first summary write rewrites the whole tab in the new shape.
+Your item list survives untouched — no manual step needed. This self-heal
+only happens on a run that actually sweeps something, though: if the
+existing history is still fresher than `refresh_rate_h`, `update()` returns
+early and the Items tab keeps its old shape until that interval has passed.
+
+**You must delete the Prices tab yourself before the first run.**
+PriceMonitor recreates it on first append, but it will not drop a history
+tab on its own — that tab is your data, it cost real API calls to
+accumulate, and a tool willing to silently discard a history tab is not one
+you can trust with the next one. The old rows measure a different quantity
+(a per-supplier price, not a UK-wide cheapest) and left in place they would
+be reindexed under the new columns with every price blank — harmless to the
+statistics, since a blank `cheapest_price` is excluded from them, but
+confusing to read. That said, the tab surviving does not mean its old data
+does: the first `append()` rewrites the columns outright, so the old
+`price`, `website`, and `source_url` values are gone from that point on.
 
 ## Installation
 
@@ -232,7 +327,7 @@ spreadsheet with that address.
 Create a Google Sheet and share it (Editor access) with the service
 account's email address. PriceMonitor will create the `Items` and `Prices`
 tabs on first write if they don't already exist; you only need to create the
-`Items` tab yourself and add your rows (`item`, `website`) to get started.
+`Items` tab yourself and add your rows (just `item`) to get started.
 
 ### 3. The secrets directory
 

@@ -116,7 +116,7 @@ for `best_rated`, no candidates at all for any of them.
 
 ```python
 def select(candidates: list[Candidate], premium_pct: float) -> tuple[
-    Detection | None, Detection | None, Detection | None
+    Candidate | None, Candidate | None, Candidate | None
 ]
 ```
 

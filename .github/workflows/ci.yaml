@@ -1,11 +1,19 @@
+---
 name: CI
 
-on:
+# Quoted: YAML 1.1 reads a bare `on` as the boolean true. GitHub's parser
+# tolerates it, but linters do not, and tag-version.yaml already quotes it.
+"on":
   push:
     branches: [ "master" ]
     tags: [ "v*.*.*" ]
   pull_request:
     branches: [ "master" ]
+
+# Least privilege: the tests job injects a PAT, so the workflow token itself
+# needs nothing beyond reading the checkout.
+permissions:
+  contents: read
 
 jobs:
   lint:

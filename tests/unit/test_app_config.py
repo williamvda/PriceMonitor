@@ -43,7 +43,7 @@ def test_missing_price_ctrl_section_falls_back_to_defaults(tmp_path, monkeypatch
     key = Fernet.generate_key().decode()
     monkeypatch.setenv("ENCRYPTION_KEY", key)
     config = load_price_config(_write_config(tmp_path, encryption_key=key))
-    assert config.price_ctrl.refresh_rate_h == 6.0
+    assert config.price_ctrl.refresh_rate_h == 24.0
     assert config.price_ctrl.poll_rate_m == 5.0
     assert config.price_ctrl.items_sheet == "Items"
     assert config.price_ctrl.history_sheet == "Prices"
@@ -112,5 +112,9 @@ def test_the_example_config_matches_the_schema(monkeypatch):
     assert example["config"]["msg_config"]["handle"] == MsgConfig().handle
 
 
-def test_market_min_confidence_defaults_to_a_half():
-    assert PriceCtrl().market_min_confidence == 0.5
+def test_rating_premium_defaults_to_five_percent():
+    assert PriceCtrl().rating_premium_pct == 0.05
+
+
+def test_min_confidence_defaults_to_a_half():
+    assert PriceCtrl().min_confidence == 0.5

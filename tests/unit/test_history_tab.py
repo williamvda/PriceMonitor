@@ -6,8 +6,9 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from price_monitor.models import MARKET_KEY, PriceReading, PriceStatus
+from price_monitor.models import Detection, PriceReading, PriceStatus
 from price_monitor.sheets.history_tab import COLUMNS, HistoryTab
+from price_monitor.sheets.items_tab import COLUMNS as ITEMS_TAB_COLUMNS
 
 
 class FakeSheet:
@@ -39,40 +40,61 @@ def _reading(
     price=100.0,
     when="2026-08-20 06:00:00",
     status=PriceStatus.OK,
-    source_url="https://shop.example/w",
-    website="shop.example",
-    confidence=None,
+    site="shop.example",
     rating="",
+    rated=None,
+    value=None,
+    confidence=None,
     sources=None,
+    note="",
 ):
+    """A sweep whose three detections default to the same cheapest offer."""
+    cheapest = None if price is None else Detection(price, site, rating)
     return PriceReading(
         timestamp=datetime.strptime(when, "%Y-%m-%d %H:%M:%S"),
         item=item,
-        website=website,
-        price=price,
         currency="GBP",
         status=status,
-        source_url=source_url,
+        best_rated=cheapest if rated is None else rated,
+        cheapest=cheapest,
+        best_value=cheapest if value is None else value,
         confidence=confidence,
-        rating=rating,
         sources=sources,
+        note=note,
     )
 
 
+def _row(
+    item: str = "Widget",
+    when: str = "2026-08-20 06:00:00",
+    price: str = "100.00",
+    status: str = "ok",
+    site: str = "shop.example",
+    confidence: str = "",
+    sources: str = "",
+) -> dict:
+    """One recorded sweep, in the string form the sheet hands back."""
+    return {
+        "timestamp": when,
+        "item": item,
+        "rated_price": price,
+        "rated_site": site,
+        "rated_rating": "",
+        "cheapest_price": price,
+        "cheapest_site": site,
+        "cheapest_rating": "",
+        "value_price": price,
+        "value_site": site,
+        "value_rating": "",
+        "confidence": confidence,
+        "sources": sources,
+        "note": "",
+        "status": status,
+    }
+
+
 def _history(rows: list[dict]) -> pd.DataFrame:
-    columns = [
-        "timestamp",
-        "item",
-        "website",
-        "price",
-        "currency",
-        "source_url",
-        "note",
-        "confidence",
-        "rating",
-        "status",
-    ]
-    return pd.DataFrame(rows, columns=columns)
+    return pd.DataFrame(rows, columns=COLUMNS)
 
 
 def test_first_append_uses_write_so_the_tab_is_created(logger):
@@ -83,21 +105,7 @@ def test_first_append_uses_write_so_the_tab_is_created(logger):
 
 
 def test_subsequent_append_uses_update_to_protect_history(logger):
-    existing = _history(
-        [
-            {
-                "timestamp": "2026-08-20 06:00:00",
-                "item": "Widget",
-                "website": "shop.example",
-                "price": "100.0",
-                "currency": "GBP",
-                "status": "ok",
-                "source_url": "",
-                "note": "",
-            }
-        ]
-    )
-    sheet = FakeSheet(existing)
+    sheet = FakeSheet(_history([_row()]))
     HistoryTab(sheet, "Prices", logger).append([_reading(when="2026-08-20 12:00:00")])
     assert sheet.writes == ["update"]
     assert len(sheet.frame) == 2
@@ -121,196 +129,168 @@ def test_status_is_written_as_its_string_value(logger):
     assert sheet.frame.iloc[0]["status"] == "suspect"
 
 
-def test_null_price_is_written_blank(logger):
+def test_all_three_detections_round_trip_into_their_own_cells(logger):
+    sheet = FakeSheet()
+    tab = HistoryTab(sheet, "Prices", logger)
+    tab.append(
+        [
+            _reading(
+                price=100.0,
+                site="cheap.example",
+                rated=Detection(140.0, "john-lewis.com", "4.6 Trustpilot"),
+                value=Detection(110.0, "argos.co.uk", "4.4 Trustpilot"),
+            )
+        ]
+    )
+    row = tab.read().iloc[0]
+    assert row["rated_price"] == "140.00"
+    assert row["rated_site"] == "john-lewis.com"
+    assert row["rated_rating"] == "4.6 Trustpilot"
+    assert row["cheapest_price"] == "100.00"
+    assert row["cheapest_site"] == "cheap.example"
+    assert row["cheapest_rating"] == ""
+    assert row["value_price"] == "110.00"
+    assert row["value_site"] == "argos.co.uk"
+    assert row["value_rating"] == "4.4 Trustpilot"
+
+
+def test_a_failed_sweep_writes_every_detection_cell_blank(logger):
     sheet = FakeSheet()
     HistoryTab(sheet, "Prices", logger).append(
         [_reading(price=None, status=PriceStatus.NOT_FOUND)]
     )
-    assert sheet.frame.iloc[0]["price"] == ""
+    row = sheet.frame.iloc[0]
+    for column in COLUMNS:
+        if column not in ("timestamp", "item", "status"):
+            assert row[column] == "", column
 
 
-def test_last_prices_uses_the_most_recent_non_null(logger):
+def test_a_sweep_with_no_rated_retailer_blanks_only_those_cells(logger):
+    """`best_rated` is absent when nothing was rated; the cheapest still stands."""
+    sheet = FakeSheet()
+    HistoryTab(sheet, "Prices", logger).append(
+        [
+            PriceReading(
+                timestamp=datetime(2026, 9, 11, 6, 0, 0),
+                item="Widget",
+                currency="GBP",
+                status=PriceStatus.OK,
+                cheapest=Detection(100.0, "shop.example"),
+            )
+        ]
+    )
+    row = sheet.frame.iloc[0]
+    assert row["rated_price"] == ""
+    assert row["value_price"] == ""
+    assert row["cheapest_price"] == "100.00"
+
+
+def test_last_prices_uses_the_most_recent_non_null_cheapest(logger):
     frame = _history(
         [
-            {
-                "timestamp": "2026-08-20 06:00:00",
-                "item": "Widget",
-                "website": "shop.example",
-                "price": "100.0",
-                "currency": "GBP",
-                "status": "ok",
-                "source_url": "",
-                "note": "",
-            },
-            {
-                "timestamp": "2026-08-20 12:00:00",
-                "item": "Widget",
-                "website": "shop.example",
-                "price": "120.0",
-                "currency": "GBP",
-                "status": "ok",
-                "source_url": "",
-                "note": "",
-            },
-            {
-                "timestamp": "2026-08-20 18:00:00",
-                "item": "Widget",
-                "website": "shop.example",
-                "price": "",
-                "currency": "GBP",
-                "status": "not_found",
-                "source_url": "",
-                "note": "",
-            },
+            _row(price="100.0"),
+            _row(price="120.0", when="2026-08-20 12:00:00"),
+            _row(price="", when="2026-08-20 18:00:00", status="not_found"),
         ]
     )
     tab = HistoryTab(FakeSheet(frame), "Prices", logger)
-    assert tab.last_prices()[("Widget", "shop.example")] == 120.0
+    assert tab.last_prices()["Widget"] == 120.0
 
 
 def test_last_prices_prefers_the_later_recorded_row_on_duplicate_timestamps(logger):
-    frame = _history(
-        [
-            {
-                "timestamp": "2026-08-20 06:00:00",
-                "item": "Widget",
-                "website": "shop.example",
-                "price": "100.0",
-                "currency": "GBP",
-                "status": "ok",
-                "source_url": "",
-                "note": "",
-            },
-            {
-                "timestamp": "2026-08-20 06:00:00",
-                "item": "Widget",
-                "website": "shop.example",
-                "price": "200.0",
-                "currency": "GBP",
-                "status": "ok",
-                "source_url": "",
-                "note": "",
-            },
-        ]
-    )
+    frame = _history([_row(price="100.0"), _row(price="200.0")])
     tab = HistoryTab(FakeSheet(frame), "Prices", logger)
-    assert tab.last_prices()[("Widget", "shop.example")] == 200.0
+    assert tab.last_prices()["Widget"] == 200.0
 
 
 def test_known_items_includes_items_with_no_successful_price(logger):
-    frame = _history(
-        [
-            {
-                "timestamp": "2026-08-20 06:00:00",
-                "item": "Ghost",
-                "website": "shop.example",
-                "price": "",
-                "currency": "GBP",
-                "status": "not_found",
-                "source_url": "",
-                "note": "",
-            }
-        ]
-    )
+    frame = _history([_row(item="Ghost", price="", status="not_found")])
     tab = HistoryTab(FakeSheet(frame), "Prices", logger)
-    assert ("Ghost", "shop.example") in tab.known_items()
+    assert "Ghost" in tab.known_items()
 
 
-def test_summarise_computes_current_min_and_mean(logger):
+def test_summarise_computes_min_and_mean_over_the_cheapest_series(logger):
     frame = _history(
         [
-            {
-                "timestamp": "2026-08-20 06:00:00",
-                "item": "Widget",
-                "website": "shop.example",
-                "price": "100.0",
-                "currency": "GBP",
-                "status": "ok",
-                "source_url": "",
-                "note": "",
-            },
-            {
-                "timestamp": "2026-08-20 12:00:00",
-                "item": "Widget",
-                "website": "shop.example",
-                "price": "50.0",
-                "currency": "GBP",
-                "status": "ok",
-                "source_url": "",
-                "note": "",
-            },
-            {
-                "timestamp": "2026-08-20 18:00:00",
-                "item": "Widget",
-                "website": "shop.example",
-                "price": "60.0",
-                "currency": "GBP",
-                "status": "ok",
-                "source_url": "",
-                "note": "",
-            },
+            _row(price="100.0"),
+            _row(price="50.0", when="2026-08-20 12:00:00"),
+            _row(price="60.0", when="2026-08-20 18:00:00"),
         ]
     )
     row = HistoryTab(FakeSheet(frame), "Prices", logger).summarise().iloc[0]
-    assert row["current"] == 60.0
+    assert row["cheapest_price"] == 60.0
     assert row["min"] == 50.0
     assert row["mean"] == 70.0
     assert row["last_checked"] == "2026-08-20 18:00:00"
 
 
-def test_last_checked_reflects_failures_too(logger):
+def test_summarise_reports_the_latest_rows_nine_detection_cells(logger):
+    sheet = FakeSheet()
+    tab = HistoryTab(sheet, "Prices", logger)
+    tab.append(
+        [
+            _reading(price=120.0, site="old.example", when="2026-09-11 06:00:00"),
+            _reading(
+                price=100.0,
+                site="cheap.example",
+                when="2026-09-11 12:00:00",
+                rated=Detection(140.0, "john-lewis.com", "4.6 Trustpilot"),
+                value=Detection(110.0, "argos.co.uk", "4.4 Trustpilot"),
+                confidence=0.9,
+                sources=4,
+            ),
+        ]
+    )
+    row = tab.summarise().iloc[0]
+    assert row["rated_price"] == 140.0
+    assert row["rated_site"] == "john-lewis.com"
+    assert row["rated_rating"] == "4.6 Trustpilot"
+    assert row["cheapest_price"] == 100.0
+    assert row["cheapest_site"] == "cheap.example"
+    assert row["value_price"] == 110.0
+    assert row["value_site"] == "argos.co.uk"
+    assert row["value_rating"] == "4.4 Trustpilot"
+    assert row["confidence"] == "0.90"
+    assert row["sources"] == "4"
+
+
+def test_a_failed_sweep_contributes_nothing_but_a_moving_timestamp(logger):
+    """A run of failures must not look like a healthy stale price."""
     frame = _history(
         [
-            {
-                "timestamp": "2026-08-20 06:00:00",
-                "item": "Widget",
-                "website": "shop.example",
-                "price": "100.0",
-                "currency": "GBP",
-                "status": "ok",
-                "source_url": "",
-                "note": "",
-            },
-            {
-                "timestamp": "2026-08-20 12:00:00",
-                "item": "Widget",
-                "website": "shop.example",
-                "price": "",
-                "currency": "GBP",
-                "status": "error",
-                "source_url": "",
-                "note": "",
-            },
+            _row(price="100.0"),
+            _row(price="", when="2026-08-20 12:00:00", status="error"),
         ]
     )
     row = HistoryTab(FakeSheet(frame), "Prices", logger).summarise().iloc[0]
-    assert row["current"] == 100.0
+    assert row["cheapest_price"] == 100.0
+    assert row["mean"] == 100.0
     assert row["last_checked"] == "2026-08-20 12:00:00"
 
 
 def test_item_with_no_prices_summarises_blank(logger):
-    frame = _history(
-        [
-            {
-                "timestamp": "2026-08-20 06:00:00",
-                "item": "Ghost",
-                "website": "shop.example",
-                "price": "",
-                "currency": "GBP",
-                "status": "not_found",
-                "source_url": "",
-                "note": "",
-            }
-        ]
-    )
+    frame = _history([_row(item="Ghost", price="", status="not_found")])
     row = HistoryTab(FakeSheet(frame), "Prices", logger).summarise().iloc[0]
-    assert row["current"] == ""
+    assert row["cheapest_price"] == ""
+    assert row["rated_price"] == ""
     assert row["min"] == ""
     assert row["mean"] == ""
+    assert row["confidence"] == ""
+    assert row["sources"] == ""
 
 
 def test_summarise_of_empty_history_is_empty(logger):
     assert HistoryTab(FakeSheet(), "Prices", logger).summarise().empty
+
+
+def test_the_items_tab_ends_with_its_own_anchor_column():
+    """`last_checked` anchors the Items row the way `status` anchors this one.
+
+    The two lists are now one object, so drift is impossible; what still
+    needs pinning is that the shared list ends with a column ItemsTab always
+    fills.
+    """
+    assert ITEMS_TAB_COLUMNS[-1] == "last_checked"
 
 
 def test_columns_end_with_status_so_trailing_cells_are_never_trimmed():
@@ -318,71 +298,43 @@ def test_columns_end_with_status_so_trailing_cells_are_never_trimmed():
 
 
 @pytest.mark.parametrize(
-    "status, source_url",
-    [
-        # A real not_found/error reading never has a source_url: nothing was
-        # found to link to. Only a successful OK reading would carry one.
-        (PriceStatus.OK, "https://shop.example/w"),
-        (PriceStatus.NOT_FOUND, ""),
-        (PriceStatus.ERROR, ""),
-    ],
+    "status",
+    [PriceStatus.OK, PriceStatus.NOT_FOUND, PriceStatus.ERROR],
 )
 def test_written_frames_final_column_is_never_empty_regardless_of_status(
-    logger, status, source_url
+    logger, status
 ):
     sheet = FakeSheet()
-    HistoryTab(sheet, "Prices", logger).append(
-        [_reading(price=None, status=status, source_url=source_url)]
-    )
+    HistoryTab(sheet, "Prices", logger).append([_reading(price=None, status=status)])
     last_column = sheet.frame.columns[-1]
     assert last_column == "status"
     assert sheet.frame.iloc[0][last_column] != ""
 
 
-def test_round_trip_with_blank_source_url_and_note_keeps_frame_intact(logger):
+def test_round_trip_of_a_fully_blank_sweep_keeps_the_frame_intact(logger):
+    """The realistic shape of a not_found sweep — every cell but status blank —
+    is the exact case the column order exists to survive."""
     sheet = FakeSheet()
-    tab = HistoryTab(sheet, "Prices", logger)
-    # note is blank by PriceReading's own default; source_url is forced blank
-    # here too, since that is the realistic shape of a not_found/error
-    # reading — the exact case the column reorder exists to survive.
-    tab.append([_reading(price=100.0, status=PriceStatus.OK, source_url="")])
-    # Simulate the Sheets API omitting the trailing empty note/source_url cells
-    # by re-reading through a frame with no NaN padding needed (full width).
+    HistoryTab(sheet, "Prices", logger).append(
+        [_reading(price=None, status=PriceStatus.NOT_FOUND)]
+    )
     read_back = HistoryTab(FakeSheet(sheet.frame), "Prices", logger).read()
     assert list(read_back.columns) == COLUMNS
     assert read_back.iloc[0]["item"] == "Widget"
-    assert read_back.iloc[0]["source_url"] == ""
     assert read_back.iloc[0]["note"] == ""
-    assert read_back.iloc[0]["status"] == "ok"
-    row = HistoryTab(FakeSheet(sheet.frame), "Prices", logger).summarise().iloc[0]
-    assert row["current"] == 100.0
+    assert read_back.iloc[0]["status"] == "not_found"
 
 
 def test_read_fills_nan_with_empty_string(logger):
     # A manually-edited or ragged sheet can produce NaN in short columns;
     # read() must not let that NaN survive into the returned frame.
     frame = pd.DataFrame(
-        [["2026-08-20 06:00:00", "Widget", "shop.example"]],
-        columns=["timestamp", "item", "website"],
+        [["2026-08-20 06:00:00", "Widget"]], columns=["timestamp", "item"]
     )
     frame = frame.reindex(columns=COLUMNS)
-    tab = HistoryTab(FakeSheet(frame), "Prices", logger)
-    result = tab.read()
+    result = HistoryTab(FakeSheet(frame), "Prices", logger).read()
     assert result.iloc[0]["status"] == ""
     assert not result.isna().any().any()
-
-
-def _checked_row(item: str, timestamp: str, status: str = "ok") -> dict:
-    return {
-        "timestamp": timestamp,
-        "item": item,
-        "website": "shop.example",
-        "price": "100.00",
-        "currency": "GBP",
-        "source_url": "",
-        "note": "",
-        "status": status,
-    }
 
 
 def test_last_checked_is_empty_for_an_empty_history(logger):
@@ -393,93 +345,73 @@ def test_last_checked_is_empty_for_an_empty_history(logger):
 def test_last_checked_returns_the_newest_timestamp_per_item(logger):
     frame = _history(
         [
-            _checked_row("Widget", "2026-08-20 06:00:00"),
-            _checked_row("Widget", "2026-08-21 06:00:00"),
-            _checked_row("Gadget", "2026-08-19 06:00:00"),
+            _row("Widget", "2026-08-20 06:00:00"),
+            _row("Widget", "2026-08-21 06:00:00"),
+            _row("Gadget", "2026-08-19 06:00:00"),
         ]
     )
     checked = HistoryTab(FakeSheet(frame), "Prices", logger).last_checked()
-    assert checked[("Widget", "shop.example")] == datetime(2026, 8, 21, 6, 0, 0)
-    assert checked[("Gadget", "shop.example")] == datetime(2026, 8, 19, 6, 0, 0)
+    assert checked["Widget"] == datetime(2026, 8, 21, 6, 0, 0)
+    assert checked["Gadget"] == datetime(2026, 8, 19, 6, 0, 0)
 
 
 def test_last_checked_ignores_row_order(logger):
     frame = _history(
         [
-            _checked_row("Widget", "2026-08-21 06:00:00"),
-            _checked_row("Widget", "2026-08-20 06:00:00"),
+            _row("Widget", "2026-08-21 06:00:00"),
+            _row("Widget", "2026-08-20 06:00:00"),
         ]
     )
     checked = HistoryTab(FakeSheet(frame), "Prices", logger).last_checked()
-    assert checked[("Widget", "shop.example")] == datetime(2026, 8, 21, 6, 0, 0)
+    assert checked["Widget"] == datetime(2026, 8, 21, 6, 0, 0)
 
 
-def test_last_checked_counts_failed_lookups(logger):
+def test_last_checked_counts_failed_sweeps(logger):
     """A not_found row spent an API call, so it counts as a check."""
-    row = _checked_row("Widget", "2026-08-21 06:00:00", status="not_found")
-    row["price"] = ""
-    checked = HistoryTab(FakeSheet(_history([row])), "Prices", logger).last_checked()
-    assert checked[("Widget", "shop.example")] == datetime(2026, 8, 21, 6, 0, 0)
+    frame = _history(
+        [_row("Widget", "2026-08-21 06:00:00", price="", status="not_found")]
+    )
+    checked = HistoryTab(FakeSheet(frame), "Prices", logger).last_checked()
+    assert checked["Widget"] == datetime(2026, 8, 21, 6, 0, 0)
 
 
 def test_last_checked_drops_unparseable_timestamps(logger):
     """Leaving the item absent makes it look unchecked, so it gets refreshed —
     a hand-edited sheet must never silently suppress a lookup."""
-    frame = _history([_checked_row("Widget", "not a timestamp")])
+    frame = _history([_row("Widget", "not a timestamp")])
     assert HistoryTab(FakeSheet(frame), "Prices", logger).last_checked() == {}
 
 
 def test_last_checked_keeps_other_items_when_one_row_is_unparseable(logger):
-    frame = _history(
-        [
-            _checked_row("Widget", "broken"),
-            _checked_row("Gadget", "2026-08-21 06:00:00"),
-        ]
-    )
+    frame = _history([_row("Widget", "broken"), _row("Gadget", "2026-08-21 06:00:00")])
     checked = HistoryTab(FakeSheet(frame), "Prices", logger).last_checked()
-    assert ("Widget", "shop.example") not in checked
-    assert checked[("Gadget", "shop.example")] == datetime(2026, 8, 21, 6, 0, 0)
-
-
-def _priced(item: str, price: str, when: str, status: str = "ok") -> dict:
-    return {
-        "timestamp": when,
-        "item": item,
-        "website": "shop.example",
-        "price": price,
-        "currency": "GBP",
-        "source_url": "",
-        "note": "",
-        "status": status,
-    }
+    assert "Widget" not in checked
+    assert checked["Gadget"] == datetime(2026, 8, 21, 6, 0, 0)
 
 
 def test_price_stats_reports_the_mean_last_price_and_count(logger):
     frame = _history(
         [
-            _priced("Widget", "100.0", "2026-08-20 06:00:00"),
-            _priced("Widget", "50.0", "2026-08-20 12:00:00"),
-            _priced("Widget", "60.0", "2026-08-20 18:00:00"),
+            _row(price="100.0"),
+            _row(price="50.0", when="2026-08-20 12:00:00"),
+            _row(price="60.0", when="2026-08-20 18:00:00"),
         ]
     )
-    stats = HistoryTab(FakeSheet(frame), "Prices", logger).price_stats()
-    entry = stats[("Widget", "shop.example")]
+    entry = HistoryTab(FakeSheet(frame), "Prices", logger).price_stats()["Widget"]
     assert entry.mean == 70.0
     assert entry.last == 60.0
     assert entry.count == 3
 
 
-def test_price_stats_ignores_rows_that_carry_no_price(logger):
+def test_price_stats_ignores_rows_that_carry_no_cheapest_price(logger):
     frame = _history(
         [
-            _priced("Widget", "100.0", "2026-08-20 06:00:00"),
-            _priced("Widget", "", "2026-08-20 12:00:00", status="not_found"),
-            _priced("Widget", "60.0", "2026-08-20 18:00:00"),
+            _row(price="100.0"),
+            _row(price="", when="2026-08-20 12:00:00", status="not_found"),
+            _row(price="60.0", when="2026-08-20 18:00:00"),
         ]
     )
-    entry = HistoryTab(FakeSheet(frame), "Prices", logger).price_stats()[
-        ("Widget", "shop.example")
-    ]
+    entry = HistoryTab(FakeSheet(frame), "Prices", logger).price_stats()["Widget"]
     assert entry.mean == 80.0
     assert entry.last == 60.0
     assert entry.count == 2
@@ -488,43 +420,16 @@ def test_price_stats_ignores_rows_that_carry_no_price(logger):
 def test_price_stats_uses_timestamp_order_not_row_order(logger):
     frame = _history(
         [
-            _priced("Widget", "60.0", "2026-08-20 18:00:00"),
-            _priced("Widget", "100.0", "2026-08-20 06:00:00"),
+            _row(price="60.0", when="2026-08-20 18:00:00"),
+            _row(price="100.0", when="2026-08-20 06:00:00"),
         ]
     )
-    entry = HistoryTab(FakeSheet(frame), "Prices", logger).price_stats()[
-        ("Widget", "shop.example")
-    ]
+    entry = HistoryTab(FakeSheet(frame), "Prices", logger).price_stats()["Widget"]
     assert entry.last == 60.0
 
 
 def test_price_stats_of_an_empty_history_is_empty(logger):
     assert HistoryTab(FakeSheet(), "Prices", logger).price_stats() == {}
-
-
-def test_confidence_and_rating_round_trip(logger):
-    sheet = FakeSheet()
-    tab = HistoryTab(sheet, "Prices", logger)
-    tab.append(
-        [
-            PriceReading(
-                timestamp=datetime(2026, 9, 11, 6, 0, 0),
-                item="Widget",
-                website=MARKET_KEY,
-                price=100.0,
-                currency="GBP",
-                status=PriceStatus.OK,
-                source_url="https://argos.co.uk/w",
-                note="4 sources, cited",
-                confidence=0.82,
-                rating="4.1 Trustpilot",
-            )
-        ]
-    )
-    frame = tab.read()
-    assert list(frame.columns)[-1] == "status"
-    assert frame["confidence"].iloc[0] == "0.82"
-    assert frame["rating"].iloc[0] == "4.1 Trustpilot"
 
 
 def test_confidence_renders_with_two_decimal_places(logger):
@@ -535,141 +440,26 @@ def test_confidence_renders_with_two_decimal_places(logger):
     tab = HistoryTab(sheet, "Prices", logger)
     tab.append(
         [
-            _reading(website=MARKET_KEY, confidence=1.0),
-            _reading(website=MARKET_KEY, confidence=0.9),
-            _reading(website=MARKET_KEY, confidence=0.0),
+            _reading(confidence=1.0),
+            _reading(confidence=0.9),
+            _reading(confidence=0.0),
         ]
     )
-    frame = tab.read()
-    assert list(frame["confidence"]) == ["1.00", "0.90", "0.00"]
-
-
-def test_supplier_rows_leave_confidence_and_rating_blank(logger):
-    sheet = FakeSheet()
-    tab = HistoryTab(sheet, "Prices", logger)
-    tab.append([_reading()])
-    frame = tab.read()
-    assert frame["confidence"].iloc[0] == ""
-    assert frame["rating"].iloc[0] == ""
-
-
-def test_summarise_ignores_market_rows(logger):
-    """The Items tab's current/min/mean describe the tracked supplier only."""
-    sheet = FakeSheet()
-    tab = HistoryTab(sheet, "Prices", logger)
-    tab.append(
-        [
-            _reading(item="Widget", website="shop.example", price=200.0),
-            _reading(item="Widget", website=MARKET_KEY, price=100.0),
-        ]
-    )
-    summary = tab.summarise()
-    assert list(summary["website"]) == ["shop.example"]
-    assert summary["current"].iloc[0] == 200.0
-
-
-def test_market_summary_reports_the_latest_sweep(logger):
-    sheet = FakeSheet()
-    tab = HistoryTab(sheet, "Prices", logger)
-    tab.append(
-        [
-            _reading(
-                item="Widget",
-                website=MARKET_KEY,
-                price=120.0,
-                when="2026-09-11 06:00:00",
-                source_url="https://www.very.co.uk/w",
-                confidence=0.7,
-                rating="4.0 Trustpilot",
-            ),
-            _reading(
-                item="Widget",
-                website=MARKET_KEY,
-                price=100.0,
-                when="2026-09-11 12:00:00",
-                source_url="https://www.argos.co.uk/w",
-                confidence=0.9,
-                rating="4.4 Trustpilot",
-            ),
-        ]
-    )
-    row = tab.market_summary().iloc[0]
-    assert row["item"] == "Widget"
-    assert row["best_price"] == 100.0
-    assert row["best_supplier"] == "argos.co.uk"
-    assert row["best_supplier_rating"] == "4.4 Trustpilot"
-    assert row["confidence"] == "0.90"
-
-
-def test_market_summary_is_empty_without_market_rows(logger):
-    sheet = FakeSheet()
-    tab = HistoryTab(sheet, "Prices", logger)
-    tab.append([_reading(item="Widget", website="shop.example", price=100.0)])
-    assert tab.market_summary().empty
-
-
-def test_market_checked_moves_even_when_a_sweep_finds_nothing(logger):
-    """A run of failed sweeps must not look like a healthy stale price."""
-    sheet = FakeSheet()
-    tab = HistoryTab(sheet, "Prices", logger)
-    tab.append(
-        [
-            _reading(
-                item="Widget",
-                website=MARKET_KEY,
-                price=100.0,
-                when="2026-09-11 06:00:00",
-                source_url="https://www.argos.co.uk/w",
-            )
-        ]
-    )
-    tab.append(
-        [
-            PriceReading(
-                timestamp=datetime(2026, 9, 12, 6, 0, 0),
-                item="Widget",
-                website=MARKET_KEY,
-                price=None,
-                currency="GBP",
-                status=PriceStatus.NOT_FOUND,
-            )
-        ]
-    )
-    row = tab.market_summary().iloc[0]
-    assert row["best_price"] == 100.0
-    assert row["market_checked"] == "2026-09-12 06:00:00"
+    assert list(tab.read()["confidence"]) == ["1.00", "0.90", "0.00"]
 
 
 def test_source_count_round_trips_and_status_stays_last(logger):
     sheet = FakeSheet()
     history = HistoryTab(sheet, "Prices", logger)
-    history.append([_reading(website=MARKET_KEY, sources=4, confidence=0.95)])
+    history.append([_reading(sources=4, confidence=0.95)])
 
     frame = history.read()
     assert list(frame.columns)[-1] == "status"
     assert frame["sources"].iloc[0] == "4"
 
 
-def test_supplier_rows_leave_the_source_count_blank(logger):
+def test_a_failed_sweep_records_no_source_count(logger):
     sheet = FakeSheet()
     history = HistoryTab(sheet, "Prices", logger)
-    history.append([_reading(website="shop.example")])
+    history.append([_reading(price=None, status=PriceStatus.ERROR)])
     assert history.read()["sources"].iloc[0] == ""
-
-
-def test_market_summary_carries_the_source_count(logger):
-    sheet = FakeSheet()
-    history = HistoryTab(sheet, "Prices", logger)
-    history.append(
-        [
-            _reading(
-                website=MARKET_KEY, price=120.0, sources=3, when="2026-08-20 06:00:00"
-            ),
-            _reading(
-                website=MARKET_KEY, price=100.0, sources=1, when="2026-08-21 06:00:00"
-            ),
-        ]
-    )
-    row = history.market_summary().iloc[0]
-    assert row["sources"] == "1"
-    assert row["best_price"] == 100.0

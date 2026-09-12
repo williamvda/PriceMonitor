@@ -7,7 +7,7 @@ from datetime import datetime
 import pytest
 
 from price_monitor.app_config import MsgConfig
-from price_monitor.models import MARKET_KEY, PriceReading, PriceStatus
+from price_monitor.models import Detection, PriceReading, PriceStatus
 from price_monitor.msgserver_client import msg_forwarder
 from price_monitor.msgserver_client.msg_forwarder import (
     MsgNotifier,
@@ -17,7 +17,6 @@ from price_monitor.msgserver_client.msg_forwarder import (
     format_check_complete,
     format_check_failed,
     format_check_started,
-    format_market_drop,
     format_price_drop,
     format_startup_message,
 )
@@ -44,14 +43,18 @@ class FakeClient:
         self.closed = True
 
 
-def _reading(status: PriceStatus) -> PriceReading:
+def _reading(
+    status: PriceStatus, price: float = 100.0, rating: str = "4.1 Trustpilot"
+) -> PriceReading:
+    """A sweep that found a cheapest retailer, unless the sweep failed."""
+    found = status not in (PriceStatus.ERROR, PriceStatus.NOT_FOUND)
     return PriceReading(
         timestamp=datetime(2026, 8, 26, 6, 0, 0),
         item="Widget",
-        website="shop.example",
-        price=100.0 if status is not PriceStatus.ERROR else None,
         currency="GBP",
         status=status,
+        cheapest=Detection(price, "argos.co.uk", rating) if found else None,
+        confidence=0.82 if found else None,
     )
 
 
@@ -231,11 +234,13 @@ def test_handler_default_handle_matches_the_config_default():
     assert msg_forwarder.MsgNotifier(FakeClient())._handle == MsgConfig().handle
 
 
-def test_price_drop_names_the_item_and_both_prices():
+def test_price_drop_names_the_retailer_its_rating_and_the_confidence():
+    """The reader did not choose this retailer, so the message must say which
+    one it is and how much the sweep supports the number."""
     message = format_price_drop(_reading(PriceStatus.OK), mean=125.0)
     assert message == (
-        "📉 PriceMonitor — Widget at shop.example: 100.00 GBP, "
-        "below its 125.00 GBP mean (-20%)"
+        "📉 PriceMonitor — Widget: 100.00 GBP at argos.co.uk "
+        "(4.1 Trustpilot, confidence 0.82), below its 125.00 GBP mean (-20%)"
     )
 
 
@@ -249,42 +254,12 @@ def test_a_further_fall_is_marked_as_still_falling():
         _reading(PriceStatus.OK), mean=125.0, still_falling=True
     )
     assert message == (
-        "📉 PriceMonitor — Widget at shop.example: 100.00 GBP, still falling, "
+        "📉 PriceMonitor — Widget: 100.00 GBP at argos.co.uk "
+        "(4.1 Trustpilot, confidence 0.82), still falling, "
         "below its 125.00 GBP mean (-20%)"
     )
 
 
-def test_market_drop_names_the_supplier_the_rating_and_the_confidence():
-    reading = PriceReading(
-        timestamp=datetime(2026, 9, 11, 6, 0, 0),
-        item="Widget",
-        website=MARKET_KEY,
-        price=86.0,
-        currency="GBP",
-        status=PriceStatus.OK,
-        source_url="https://argos.co.uk/w",
-        confidence=0.82,
-        rating="4.1 Trustpilot",
-    )
-    message = format_market_drop(reading, mean=100.0)
-    assert "Widget" in message
-    assert "argos.co.uk" in message
-    assert "4.1 Trustpilot" in message
-    assert "0.82" in message
-    assert "14%" in message
-
-
-def test_market_drop_says_unrated_when_the_retailer_has_no_rating():
-    reading = PriceReading(
-        timestamp=datetime(2026, 9, 11, 6, 0, 0),
-        item="Widget",
-        website=MARKET_KEY,
-        price=86.0,
-        currency="GBP",
-        status=PriceStatus.OK,
-        source_url="https://tinyshop.co.uk/w",
-        confidence=0.6,
-        rating="",
-    )
-    message = format_market_drop(reading, mean=100.0)
-    assert "unrated" in message
+def test_a_drop_says_unrated_when_the_cheapest_retailer_has_no_rating():
+    message = format_price_drop(_reading(PriceStatus.OK, rating=""), mean=125.0)
+    assert "(unrated, confidence 0.82)" in message

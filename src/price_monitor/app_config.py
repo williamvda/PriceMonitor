@@ -40,7 +40,7 @@ class LLMConfig:
 class PriceCtrl:
     """Timing, sheet names, and validation thresholds."""
 
-    refresh_rate_h: float = 6.0
+    refresh_rate_h: float = 24.0
     poll_rate_m: float = 5.0
     items_sheet: str = "Items"
     history_sheet: str = "Prices"
@@ -53,10 +53,18 @@ class PriceCtrl:
     # announced once per band it gives up, so a slow slide keeps reporting
     # without a message on every refresh. 0.05 = one message per 5% lost.
     drop_step: float = 0.05
-    # A market sweep below this confidence is recorded but never announced.
+    # The other half of the drop rule: below this many recorded sweeps the mean
+    # tracks jitter rather than a settled price, so a "drop" against it would
+    # say nothing. At the default 24h refresh a new item is quiet for 3 days.
+    min_readings: int = 3
+    # A sweep below this confidence is recorded but never announced.
     # Corroboration alone caps a single-source sweep at 0.33, so this threshold
     # is also what decides that one retailer is not a market.
-    market_min_confidence: float = 0.5
+    min_confidence: float = 0.5
+    # Fraction of the baseline price the user will pay per rating point when
+    # choosing the best-value detection. 0.05 = one extra rating point is worth
+    # up to 5% more.
+    rating_premium_pct: float = 0.05
     max_plausible_price: float = 100000.0
     request_delay_s: float = 2.0
 

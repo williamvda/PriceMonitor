@@ -4,12 +4,10 @@ Public surface: :class:`MsgServerHandler`, a logging handler that forwards each
 warning-or-above record to a MsgServer handle; :class:`MsgNotifier`, for
 deliberate status messages that are not log records; :func:`attach_msg_server`
 and :func:`detach_msg_server` for wiring and teardown; and the
-``format_*`` helpers that render the start, complete, failure, and
-price-drop notices for one pricing check — :func:`format_market_drop` covers
-a drop in the UK-wide market sweep, :func:`format_price_drop` a supplier one.
-The handler is purely additive — records still reach every other handler on
-the logger, so console output is unchanged whether or not the server is
-reachable.
+``format_*`` helpers that render the start, complete, failure, and price-drop
+notices for one pricing check. The handler is purely additive — records still
+reach every other handler on the logger, so console output is unchanged whether
+or not the server is reachable.
 """
 
 import logging
@@ -17,16 +15,12 @@ import threading
 from typing import Any
 
 from price_monitor.app_config import MsgConfig
-from price_monitor.models import PriceReading, PriceStatus, supplier_domain
+from price_monitor.models import PriceReading, PriceStatus
 
 _MISSING_PACKAGE_HINT = (
     "The msgserver client is not installed. "
     "Install it with: pip install 'price-monitor[msgserver]'"
 )
-
-# A reading with one of these statuses carries a usable price that was written
-# to the history tab; anything else produced no number for this run.
-_RECORDED_STATUSES = (PriceStatus.OK, PriceStatus.SUSPECT)
 
 
 class MsgServerHandler(logging.Handler):
@@ -117,7 +111,7 @@ def format_check_complete(label: str, readings: list[PriceReading]) -> str:
     priced rather than failed — the flag is on the value, not the lookup.
     """
     total = len(readings)
-    priced = sum(1 for r in readings if r.status in _RECORDED_STATUSES)
+    priced = sum(1 for r in readings if r.cheapest is not None)
     icon = "✅" if priced == total else "❌"
     return (
         f"{icon} PriceMonitor {label} complete — "
@@ -128,44 +122,27 @@ def format_check_complete(label: str, readings: list[PriceReading]) -> str:
 def format_price_drop(
     reading: PriceReading, mean: float, still_falling: bool = False
 ) -> str:
-    """Render the notice sent when an item drops further below its mean price.
+    """Render the notice sent when an item's cheapest price drops below its mean.
+
+    Names the retailer and its rating: the reader did not choose where this
+    price comes from and needs both to judge whether to act on it.
 
     ``still_falling`` marks a price that was already under the mean before this
-    reading, so an ongoing slide reads differently from a fresh crossing.
-
-    A SUSPECT reading is flagged rather than suppressed: a big crash is exactly
+    reading, so an ongoing slide reads differently from a fresh crossing. A
+    SUSPECT reading is flagged rather than suppressed: a big crash is exactly
     what is worth knowing about, but it is also the likeliest hallucination, so
     the message says which it might be and leaves the call to the reader.
     """
-    change = (reading.price - mean) / mean
+    cheapest = reading.cheapest
+    change = (cheapest.price - mean) / mean
     trend = " still falling," if still_falling else ""
     suffix = " (suspect)" if reading.status is PriceStatus.SUSPECT else ""
+    rating = cheapest.rating or "unrated"
     return (
-        f"📉 PriceMonitor — {reading.item} at {reading.website}: "
-        f"{reading.price:.2f} {reading.currency},{trend} "
-        f"below its {mean:.2f} {reading.currency} mean ({change:.0%}){suffix}"
-    )
-
-
-def format_market_drop(
-    reading: PriceReading, mean: float, still_falling: bool = False
-) -> str:
-    """Render the notice sent when the best UK price drops below its mean.
-
-    Names the retailer and its rating because, unlike a supplier drop, the
-    reader has not chosen where this price comes from and needs both to judge
-    whether to act on it.
-    """
-    change = (reading.price - mean) / mean
-    trend = " still falling," if still_falling else ""
-    suffix = " (suspect)" if reading.status is PriceStatus.SUSPECT else ""
-    supplier = supplier_domain(reading.source_url) or "an unnamed retailer"
-    rating = reading.rating or "unrated"
-    return (
-        f"📉 PriceMonitor — best UK price for {reading.item}: "
-        f"{reading.price:.2f} {reading.currency} at {supplier} "
-        f"({rating}, confidence {reading.confidence:.2f}),{trend} "
-        f"below its {mean:.2f} {reading.currency} mean ({change:.0%}){suffix}"
+        f"📉 PriceMonitor — {reading.item}: {cheapest.price:.2f} "
+        f"{reading.currency} at {cheapest.site} ({rating}, confidence "
+        f"{reading.confidence:.2f}),{trend} below its {mean:.2f} "
+        f"{reading.currency} mean ({change:.0%}){suffix}"
     )
 
 

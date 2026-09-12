@@ -1,26 +1,17 @@
 """Value objects for PriceMonitor.
 
-Defines the tracked :class:`Item` and :class:`PriceReading` recorded for it on
-each run, the :class:`PriceStatus` describing how that reading turned out, and
-the :class:`PriceStats` summarising an item's history so far. Exports the
-:data:`MARKET_KEY` sentinel and :func:`supplier_domain` utility for market sweeps.
+Defines the tracked :class:`Item`, the :class:`Detection` naming one retailer's
+offer, and the :class:`PriceReading` recorded for it on each run, the
+:class:`PriceStatus` describing how that reading turned out, and the
+:class:`PriceStats` summarising an item's history so far.
+
+These are the value objects that cross the search -> sheets -> notifier
+boundary, which is why they live here rather than in any one layer.
 """
 
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from urllib.parse import urlparse
-
-# The sentinel `website` under which a UK-wide market sweep is recorded, so its
-# readings share the history tab with per-supplier ones while keeping their own
-# (item, website) series: their own mean, baseline and drop bands.
-MARKET_KEY = "market"
-
-
-def supplier_domain(url: str) -> str:
-    """The bare domain of ``url``, as the sheet's ``best_supplier`` value."""
-    netloc = urlparse(url.strip()).netloc.lower()
-    return netloc[4:] if netloc.startswith("www.") else netloc
 
 
 class PriceStatus(str, Enum):
@@ -29,54 +20,53 @@ class PriceStatus(str, Enum):
     OK = "ok"
     SUSPECT = "suspect"
     NOT_FOUND = "not_found"
-    WRONG_CURRENCY = "wrong_currency"
-    REJECTED = "rejected"
     PARSE_ERROR = "parse_error"
     ERROR = "error"
 
 
 @dataclass(frozen=True)
+class Detection:
+    """One retailer's offer, as one of a sweep's three answers.
+
+    ``rating`` is the display string the sheet shows, already formatted — it is
+    never parsed back into a number. Ranking happens on :class:`Candidate`
+    before a detection is built.
+    """
+
+    price: float
+    site: str
+    rating: str = ""
+
+
+@dataclass(frozen=True)
 class Item:
-    """One tracked product, as written on the Items tab."""
+    """One tracked product. The user types only its name."""
 
     name: str
-    website: str
-    market: bool = False
-
-    @property
-    def is_direct_url(self) -> bool:
-        """True when ``website`` names a product page rather than a site to search."""
-        target = self.website.strip()
-        for scheme in ("https://", "http://"):
-            if target.lower().startswith(scheme):
-                target = target[len(scheme) :]
-                break
-        _, _, remainder = target.partition("/")
-        return bool(remainder.strip())
 
 
 @dataclass(frozen=True)
 class PriceReading:
-    """A single observation of an item's price at a point in time."""
+    """One sweep's result for one item.
+
+    A detection is ``None`` when the sweep could not produce it: no rated
+    candidate for ``best_rated``, no surviving candidate at all for any of them.
+    """
 
     timestamp: datetime
     item: str
-    website: str
-    price: float | None
     currency: str
     status: PriceStatus
-    source_url: str = ""
-    note: str = ""
+    best_rated: Detection | None = None
+    cheapest: Detection | None = None
+    best_value: Detection | None = None
     confidence: float | None = None
-    rating: str = ""
     sources: int | None = None
+    note: str = ""
 
 
 # Below this many readings the mean tracks jitter rather than a settled price,
 # so a "drop" against it says nothing useful.
-_MIN_READINGS = 3
-
-
 @dataclass(frozen=True)
 class PriceStats:
     """An item's priced history summarised, as the baseline for the next reading."""
@@ -85,7 +75,7 @@ class PriceStats:
     last: float
     count: int
 
-    def new_drop_band(self, price: float, step: float) -> int:
+    def new_drop_band(self, price: float, step: float, min_readings: int) -> int:
         """The deeper band ``price`` has just entered, or 0 if it has not.
 
         Bands sit at the mean and every ``step`` below it, so band 1 is the
@@ -96,7 +86,7 @@ class PriceStats:
         prices are measured against the same mean — the one from before this
         reading was recorded.
         """
-        if self.count < _MIN_READINGS:
+        if self.count < min_readings:
             return 0
         band = self._band(price, step)
         return band if band > self._band(self.last, step) else 0

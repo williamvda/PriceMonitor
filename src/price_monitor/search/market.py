@@ -1,11 +1,11 @@
 """UK-wide market sweep.
 
 Asks a search-grounded model what an item costs across UK retailers generally,
-ranks the answers, and records the cheapest one that survives validation with a
-confidence score describing how much the sweep supports it. Mirrors
-:class:`~price_monitor.search.searcher.PriceSearcher`'s two-call shape for the
-same reason: grounding and structured output are unreliable together. Nothing
-raises out of :meth:`price_market`.
+then reports three answers from the candidates that survive validation — the
+best-rated retailer, the cheapest, and the best compromise between them — with
+a confidence score describing how much the sweep supports them. Two calls,
+because grounding and structured output are unreliable together. Nothing raises
+out of :meth:`price_market`.
 """
 
 import logging
@@ -16,8 +16,9 @@ from llmbridge.exceptions import LLMError
 from py_utils.logger import get_child_logger
 
 from price_monitor.app_config import LLMConfig, PriceCtrl
-from price_monitor.models import MARKET_KEY, Item, PriceReading, PriceStatus
-from price_monitor.search.confidence import FLOOR_RATING, Candidate, score
+from price_monitor.models import Item, PriceReading, PriceStatus
+from price_monitor.search.confidence import Candidate, score
+from price_monitor.search.detections import select, to_detection
 from price_monitor.search.gemini_search import grounding_urls
 from price_monitor.search.json_extract import extract_json
 from price_monitor.search.prompts import market_format_prompt, market_prompt
@@ -126,20 +127,29 @@ class MarketSearcher:
             return self._failed(item, timestamp, PriceStatus.NOT_FOUND, note)
 
         candidates = [candidate for candidate, _ in pairs]
-        winner = min(candidates, key=lambda c: c.price)
-        # `is`, not `==`: two candidates can share identical field values, and
-        # only the object actually chosen as winner carries the right note.
-        winner_vat_note = next(n for c, n in pairs if c is winner)
-        value, reason = score(candidates, urls)
+        rated_pick, cheapest_pick, value_pick = select(
+            candidates, self._ctrl.rating_premium_pct
+        )
+        if cheapest_pick is None:
+            # select() only returns None across the board when `candidates`
+            # is empty, which cannot happen here (`pairs` was just checked
+            # above) — but `Candidate | None` doesn't say so, and this module
+            # promises nothing raises out of price_market(), so the guarantee
+            # is made explicit rather than assumed.
+            return self._failed(
+                item, timestamp, PriceStatus.NOT_FOUND, "no usable candidates"
+            )
+        # `is`, not `==`: two candidates can share every field value, and only
+        # the object actually chosen carries the right VAT note.
+        winner_vat_note = next(n for c, n in pairs if c is cheapest_pick)
+        value, reason = score(candidates, cheapest_pick, urls)
 
         status = PriceStatus.OK
         note = reason
         if winner_vat_note:
-            # Only the winner's note matters — a discarded candidate's VAT
-            # adjustment never reaches the sheet, same as its price.
             note = f"{note}; {winner_vat_note}"
         if last_price is not None and last_price > 0:
-            move = abs(winner.price - last_price) / last_price
+            move = abs(cheapest_pick.price - last_price) / last_price
             if move > self._ctrl.suspect_threshold:
                 status = PriceStatus.SUSPECT
                 note = f"{note}; moved {move:.0%} from {last_price}"
@@ -147,22 +157,21 @@ class MarketSearcher:
         return PriceReading(
             timestamp=timestamp,
             item=item.name,
-            website=MARKET_KEY,
-            price=winner.price,
             currency=self._ctrl.currency,
             status=status,
-            source_url=winner.url,
-            note=note,
+            best_rated=to_detection(rated_pick),
+            cheapest=to_detection(cheapest_pick),
+            best_value=to_detection(value_pick),
             confidence=value,
-            rating=winner.rating_label,
             # Survivors, not the number the model named: a retailer that is
-            # out of stock or below the floor cannot sell it, and this is the
-            # same count corroboration scored.
+            # out of stock or failed validation cannot sell it, and this is
+            # the same count corroboration scored.
             sources=len(candidates),
+            note=note,
         )
 
     def _candidates(self, payload: dict) -> list[tuple[Candidate, str]]:
-        """Validated, in-stock, above-floor candidates, VAT-normalised.
+        """Validated, in-stock candidates, VAT-normalised.
 
         Each candidate is paired with the VAT-adjustment note
         :func:`normalise_price` returned for it (blank when its price needed
@@ -177,8 +186,8 @@ class MarketSearcher:
             if not isinstance(raw, dict):
                 continue
 
-            price, failure, vat_note = normalise_price(raw, self._ctrl)
-            if failure is not None or price is None:
+            price, vat_note = normalise_price(raw, self._ctrl)
+            if price is None:
                 continue
             if raw.get("in_stock", True) is False:
                 continue
@@ -188,8 +197,7 @@ class MarketSearcher:
                 # Ratings are out of 5. A value outside that range (a rating
                 # out of 10, or a review count mistaken for a score) is not a
                 # trustworthy 5-point score, so it is treated as unknown
-                # rather than let it sail past the floor and inflate
-                # reputation to 1.0.
+                # rather than displayed as one.
                 rating = None
             count = _as_int(raw.get("rating_count"))
             candidate = Candidate(
@@ -201,16 +209,6 @@ class MarketSearcher:
                 rating_count=count,
                 rating_source=str(raw.get("rating_source") or "").strip(),
             )
-            # The floor needs both halves: a bad score on a handful of reviews
-            # is noise. An unrated retailer is never dropped here — plenty of
-            # legitimate specialists have no Trustpilot presence, and dropping
-            # them would bias every sweep toward the big chains.
-            if candidate.rated and candidate.rating < FLOOR_RATING:
-                self.logger.info(
-                    f"Dropping {candidate.supplier}: rated {candidate.rating} "
-                    f"on {candidate.rating_count} reviews"
-                )
-                continue
             candidates.append((candidate, vat_note))
         return candidates
 
@@ -220,8 +218,6 @@ class MarketSearcher:
         return PriceReading(
             timestamp=timestamp,
             item=item.name,
-            website=MARKET_KEY,
-            price=None,
             currency=self._ctrl.currency,
             status=status,
             note=note,

@@ -1,38 +1,20 @@
-"""Two-call price lookup.
+"""Shared retry loop for the search-provider calls in ``market.py``.
 
-Call one asks a search-grounded model for a prose report; call two converts
-that report to JSON with grounding switched off, because Gemini's grounding and
-structured output are unreliable together. Every failure path returns a
-:class:`PriceReading` carrying a status — nothing raises out of :meth:`price`.
-
-Both calls retry transient server-side failures with exponential backoff; see
-:func:`retrying` for the retry mechanism and :func:`_is_retryable` for what
-counts. Grounding on call one can be switched off via ``LLMConfig.grounded``.
+Both the search and format calls retry transient server-side failures with
+exponential backoff; see :func:`retrying` for the retry mechanism and
+:func:`_is_retryable` for what counts as transient.
 
 Exports :func:`retrying` (the retry loop) and :const:`FORMAT_PROVIDER` (the
-un-grounded provider name) for reuse by other searchers.
+un-grounded provider name), both consumed by
+:class:`~price_monitor.search.market.MarketSearcher`.
 """
 
 import logging
 import time
-from datetime import datetime
 from typing import Callable
 
-from llmbridge import LLMClient
 from llmbridge.exceptions import LLMConnectionError, LLMError, LLMResponseError
 from llmbridge.models import PromptResponse
-from py_utils.logger import get_child_logger
-
-from price_monitor.app_config import LLMConfig, PriceCtrl
-from price_monitor.models import Item, PriceReading, PriceStatus
-
-# Importing this module registers the "gemini_search" provider with
-# llmbridge's ProviderRegistry as a side effect — do not remove it even
-# though only grounding_urls is used by name below.
-from price_monitor.search.gemini_search import grounding_urls
-from price_monitor.search.json_extract import extract_json
-from price_monitor.search.prompts import format_prompt, search_prompt
-from price_monitor.search.validation import validate
 
 # Call two must not be grounded: it is the un-grounded regime that makes JSON
 # output reliable, which is the whole reason the lookup is split in two.
@@ -77,102 +59,3 @@ def retrying(
             time.sleep(delay)
             delay *= 2
     raise LLMError(f"{label} call exhausted retries")  # unreachable
-
-
-class PriceSearcher:
-    """Prices a single :class:`Item` using a grounded search then a formatter."""
-
-    def __init__(
-        self,
-        config: LLMConfig,
-        ctrl: PriceCtrl,
-        logger: logging.Logger,
-        search_client: LLMClient | None = None,
-        format_client: LLMClient | None = None,
-    ) -> None:
-        self.logger = get_child_logger(logger, __class__.__name__)
-        self._ctrl = ctrl
-        search_provider = config.provider if config.grounded else FORMAT_PROVIDER
-        if not config.grounded:
-            self.logger.warning(
-                "Grounding disabled: prices come from model recall, and "
-                "source_url is unverified."
-            )
-        self._search_client = search_client or LLMClient(
-            provider=search_provider,
-            api_key=config.api_key,
-            model=config.model,
-            max_tokens=config.max_tokens,
-            temperature=config.temperature,
-            timeout=config.timeout,
-        )
-        self._format_client = format_client or LLMClient(
-            provider=FORMAT_PROVIDER,
-            api_key=config.api_key,
-            model=config.model,
-            max_tokens=config.max_tokens,
-            temperature=config.temperature,
-            timeout=config.timeout,
-        )
-
-    def price(
-        self, item: Item, last_price: float | None, timestamp: datetime
-    ) -> PriceReading:
-        """Look up ``item``'s current price, never raising on failure."""
-        try:
-            searched = retrying(
-                lambda: self._search_client.prompt(search_prompt(item)),
-                "search",
-                self.logger,
-            )
-        except (LLMError, KeyError, IndexError, TypeError) as exc:
-            # llmbridge's LLMClient.prompt() wraps only transport failures
-            # (_http_post) as LLMError; it calls the provider's
-            # parse_response() unguarded. The stock Gemini parser indexes
-            # candidates[0]/parts[0] with no .get() guards, so a
-            # safety-filtered response (empty candidates) or a MAX_TOKENS
-            # truncation (empty parts) raises IndexError/KeyError straight
-            # out of prompt() rather than coming back as an LLMError.
-            self.logger.warning(f"Search call failed for '{item.name}': {exc}")
-            return self._failed(item, timestamp, PriceStatus.ERROR, str(exc))
-
-        if not searched.text or not searched.text.strip():
-            self.logger.warning(f"Search returned no text for '{item.name}'")
-            return self._failed(
-                item, timestamp, PriceStatus.PARSE_ERROR, "empty search reply"
-            )
-
-        urls = grounding_urls(searched.raw_response)
-
-        try:
-            formatted = retrying(
-                lambda: self._format_client.prompt(format_prompt(searched.text, urls)),
-                "format",
-                self.logger,
-            )
-        except (LLMError, KeyError, IndexError, TypeError) as exc:
-            # Same unguarded parse_response() exposure as call one above —
-            # the un-grounded stock GeminiProvider is not immune to it.
-            self.logger.warning(f"Format call failed for '{item.name}': {exc}")
-            return self._failed(item, timestamp, PriceStatus.ERROR, str(exc))
-
-        try:
-            payload = extract_json(formatted.text)
-        except ValueError as exc:
-            self.logger.warning(f"Unparseable reply for '{item.name}': {exc}")
-            return self._failed(item, timestamp, PriceStatus.PARSE_ERROR, str(exc))
-
-        return validate(payload, item, timestamp, self._ctrl, last_price, urls)
-
-    def _failed(
-        self, item: Item, timestamp: datetime, status: PriceStatus, note: str
-    ) -> PriceReading:
-        return PriceReading(
-            timestamp=timestamp,
-            item=item.name,
-            website=item.website,
-            price=None,
-            currency=self._ctrl.currency,
-            status=status,
-            note=note,
-        )
