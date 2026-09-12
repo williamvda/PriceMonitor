@@ -35,7 +35,13 @@ name asks for one. Do not guess a price; list only prices you actually saw.
 
 If, after searching properly, the product really is sold by only one retailer,
 list only that one — but do not pad the list with retailers you did not check,
-and do not stop searching early just because you already have a few."""
+and do not stop searching early just because you already have a few.
+
+Finish your report with a line reading exactly:
+
+END: <n> retailers
+
+where <n> is how many retailers you listed above."""
 
 _MARKET_FORMAT_TEMPLATE = (
     """Convert the report below into one JSON object and nothing else.

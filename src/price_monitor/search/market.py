@@ -9,6 +9,7 @@ out of :meth:`price_market`.
 """
 
 import logging
+import re
 from datetime import datetime
 
 from llmbridge import LLMClient
@@ -29,6 +30,19 @@ from price_monitor.search.validation import normalise_price
 # trustworthy score — e.g. the model reported one out of 10 — so it is
 # treated as unknown rather than trusted.
 MAX_RATING = 5.0
+
+
+# The search call is asked to sign off with "END: <n> retailers". Its absence
+# says nothing on its own — a model that forgets the line must not cost a
+# sweep its prices — but when present it is the only evidence of how many
+# retailers the prose named before the second call converted it.
+_END_MARKER = re.compile(r"END:\s*(\d+)", re.IGNORECASE)
+
+
+def _declared_count(report: str) -> int | None:
+    """How many retailers the search call says it listed, if it said."""
+    matches = _END_MARKER.findall(report)
+    return int(matches[-1]) if matches else None
 
 
 class MarketSearcher:
@@ -119,7 +133,15 @@ class MarketSearcher:
             self.logger.warning(f"Unparseable market reply for '{item.name}': {exc}")
             return self._failed(item, timestamp, PriceStatus.PARSE_ERROR, str(exc))
 
-        return self._rank(payload, item, timestamp, last_price, urls, truncated)
+        return self._rank(
+            payload,
+            item,
+            timestamp,
+            last_price,
+            urls,
+            truncated,
+            _declared_count(searched.text),
+        )
 
     def _rank(
         self,
@@ -129,6 +151,7 @@ class MarketSearcher:
         last_price: float | None,
         urls: list[str],
         truncated: bool = False,
+        declared: int | None = None,
     ) -> PriceReading:
         pairs = self._candidates(payload)
         if not pairs:
@@ -159,6 +182,8 @@ class MarketSearcher:
             # On the sheet, not just in the log: a sweep that lost candidates
             # to the token ceiling looks identical to a thorough one.
             note = f"{note}; report truncated, retailers may be missing"
+        if dropped := self._dropped_in_conversion(payload, declared):
+            note = f"{note}; {dropped}"
         if winner_vat_note:
             note = f"{note}; {winner_vat_note}"
         if last_price is not None and last_price > 0:
@@ -182,6 +207,27 @@ class MarketSearcher:
             sources=len(candidates),
             note=note,
         )
+
+    def _dropped_in_conversion(self, payload: dict, declared: int | None) -> str:
+        """Say so when the JSON call kept fewer retailers than the prose named.
+
+        The two calls are the seam nothing else watches: the search call can
+        name six retailers and the conversion emit three, leaving valid JSON,
+        a healthy status and no trace of the three that vanished. A model that
+        omits the count simply disables the check — it must never cost a sweep
+        its prices.
+        """
+        if declared is None:
+            return ""
+        converted = payload.get("candidates")
+        kept = len(converted) if isinstance(converted, list) else 0
+        if kept >= declared:
+            return ""
+        self.logger.warning(
+            f"Conversion kept {kept} of the {declared} retailers the search "
+            f"reported — the rest were lost between the two calls."
+        )
+        return f"converted {kept} of {declared} retailers reported"
 
     def _candidates(self, payload: dict) -> list[tuple[Candidate, str]]:
         """Validated, in-stock candidates, VAT-normalised.

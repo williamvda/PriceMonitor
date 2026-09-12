@@ -69,3 +69,12 @@ def test_market_format_prompt_names_every_schema_field():
         "rating_source",
     ):
         assert f'"{field}"' in prompt
+
+
+def test_market_prompt_asks_for_a_terminating_count():
+    """The sign-off is the only evidence of how many retailers the prose
+    named before the second call converted it — and its absence doubles as a
+    truncation check, since a cut-off report cannot carry its own last line."""
+    prompt = market_prompt(Item(name="Widget"))
+    assert "END: <n> retailers" in prompt
+    assert "how many retailers you listed" in prompt

@@ -12,7 +12,7 @@ import price_monitor.search.market as market_module
 import price_monitor.search.searcher as searcher_module
 from price_monitor.app_config import LLMConfig, PriceCtrl
 from price_monitor.models import Item, PriceStatus
-from price_monitor.search.market import MarketSearcher
+from price_monitor.search.market import MarketSearcher, _declared_count
 
 NOW = datetime(2026, 9, 11, 6, 0, 0)
 ITEM = Item(name="Widget")
@@ -461,3 +461,60 @@ def test_grounded_flag_picks_the_call_one_provider(
     MarketSearcher(LLMConfig(api_key="k", grounded=grounded), PriceCtrl(), logger)
     # Call two is always un-grounded, whatever call one does.
     assert _RecordingClient.providers == [expected_search_provider, "gemini"]
+
+
+def test_the_declared_count_is_read_from_the_sign_off():
+    assert _declared_count("... report ...\n\nEND: 5 retailers") == 5
+    assert _declared_count("END:4 retailers") == 4
+    assert _declared_count("end: 3 retailers") == 3
+
+
+def test_a_report_without_a_sign_off_declares_nothing():
+    """A model that forgets the line disables the check; it must not break it."""
+    assert _declared_count("a report with no marker") is None
+    assert _declared_count("") is None
+
+
+def test_the_last_sign_off_wins_if_the_model_repeats_itself():
+    assert _declared_count("END: 2 retailers ... more ... END: 6 retailers") == 6
+
+
+def test_retailers_lost_between_the_two_calls_are_recorded(logger):
+    """The search prose named four; the conversion emitted two. Valid JSON, a
+    healthy status, and nothing else would ever mention the missing two."""
+    payload = json.dumps(
+        {"candidates": [_candidate(price=100.0), _candidate(price=120.0)], "note": ""}
+    )
+    searcher = MarketSearcher(
+        LLMConfig(api_key="k"),
+        PriceCtrl(),
+        logger,
+        search_client=FakeClient(_response("a report\n\nEND: 4 retailers")),
+        format_client=FakeClient(_response(payload)),
+    )
+    reading = searcher.price_market(ITEM, None, NOW)
+    assert reading.status == PriceStatus.OK
+    assert "converted 2 of 4 retailers reported" in reading.note
+
+
+def test_a_faithful_conversion_adds_no_note(logger):
+    payload = json.dumps(
+        {"candidates": [_candidate(price=100.0), _candidate(price=120.0)], "note": ""}
+    )
+    searcher = MarketSearcher(
+        LLMConfig(api_key="k"),
+        PriceCtrl(),
+        logger,
+        search_client=FakeClient(_response("a report\n\nEND: 2 retailers")),
+        format_client=FakeClient(_response(payload)),
+    )
+    assert "retailers reported" not in searcher.price_market(ITEM, None, NOW).note
+
+
+def test_a_missing_sign_off_leaves_the_sweep_alone(logger):
+    """Non-compliance disables the check rather than costing the prices."""
+    searcher = _searcher(logger, [_candidate(price=100.0)])
+    reading = searcher.price_market(ITEM, None, NOW)
+    assert reading.status == PriceStatus.OK
+    assert reading.cheapest.price == 100.0
+    assert "retailers reported" not in reading.note
