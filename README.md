@@ -12,7 +12,7 @@ site.
 
 Two independent timers drive the controller:
 
-- **Full refresh** (`refresh_rate_h`, default 6 hours) — prices every item on
+- **Full refresh** (`refresh_rate_h`, default 24 hours) — prices every item on
   the Items tab and rewrites the summary.
 - **Poll** (`poll_rate_m`, default 5 minutes) — checks whether the sheet has
   changed since the last check and, if so, prices only the items that are new
@@ -71,6 +71,13 @@ quantity with a meaningful trend. The best-rated retailer's price says more
 about that retailer than about the market, and the best-value pick moves
 with whichever candidates a given sweep happened to return, so neither would
 give a stable series worth comparing against itself.
+
+A drop is only announced once an item has **three** recorded sweeps — below
+that the mean tracks jitter rather than a settled price, so a "drop" against
+it would say nothing. At the default 24-hour refresh that means a newly added
+item stays quiet for its first three days. Lower `refresh_rate_h` if you want
+a new item to start reporting sooner, remembering that each sweep is a billed
+search.
 
 #### The best-value rule
 

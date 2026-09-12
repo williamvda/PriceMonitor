@@ -12,7 +12,7 @@
       "temperature": 0.0
     },
     "price_ctrl": {
-      "refresh_rate_h": 6,
+      "refresh_rate_h": 24,
       "poll_rate_m": 5,
       "items_sheet": "Items",
       "history_sheet": "Prices",

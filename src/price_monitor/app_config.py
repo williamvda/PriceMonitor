@@ -40,7 +40,7 @@ class LLMConfig:
 class PriceCtrl:
     """Timing, sheet names, and validation thresholds."""
 
-    refresh_rate_h: float = 6.0
+    refresh_rate_h: float = 24.0
     poll_rate_m: float = 5.0
     items_sheet: str = "Items"
     history_sheet: str = "Prices"

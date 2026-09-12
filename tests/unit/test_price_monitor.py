@@ -86,6 +86,14 @@ def _items(names: list[str]) -> pd.DataFrame:
     return pd.DataFrame([{"item": n} for n in names], columns=["item"])
 
 
+# Expressed relative to the configured window, not as a magic number of hours:
+# a test that hardcodes "7 hours ago" silently stops testing staleness the day
+# refresh_rate_h changes.
+_REFRESH_H = PriceCtrl().refresh_rate_h
+_STALE = timedelta(hours=_REFRESH_H + 1)
+_FRESH = timedelta(hours=_REFRESH_H / 2)
+
+
 def _history_row(
     item: str, when: datetime, price: float | None = 100.0, status: str = "ok"
 ) -> dict[str, str]:
@@ -156,7 +164,7 @@ def test_poll_does_nothing_when_the_sheet_is_unchanged(logger, searcher):
 
 
 def test_poll_sweeps_only_the_new_item(logger, searcher):
-    old = datetime.now() - timedelta(hours=1)
+    old = datetime.now() - _FRESH
     sheet = _sheet_with_history([_history_row("Widget", old)], ["Widget", "Gadget"])
     monitor = _monitor(sheet, searcher, logger)
     sheet.modified = True
@@ -190,7 +198,7 @@ def test_a_failing_sweep_records_no_detections(logger, searcher):
 
 
 def test_the_last_cheapest_price_is_passed_to_the_searcher(logger, searcher):
-    old = datetime.now() - timedelta(hours=7)
+    old = datetime.now() - _STALE
     sheet = _sheet_with_history([_history_row("Widget", old, price=80.0)], ["Widget"])
     _monitor(sheet, searcher, logger).update()
     assert searcher.seen_last_price == 80.0
@@ -256,28 +264,28 @@ def test_parser_accepts_once_flag():
 
 def test_update_skips_an_item_checked_within_the_refresh_window(logger, searcher):
     """Each sweep costs a billed search, so a recent check holds off the next."""
-    recent = datetime.now() - timedelta(hours=1)
+    recent = datetime.now() - _FRESH
     sheet = _sheet_with_history([_history_row("Widget", recent)], ["Widget"])
     _monitor(sheet, searcher, logger).update()
     assert searcher.swept == []
 
 
 def test_update_sweeps_an_item_checked_before_the_refresh_window(logger, searcher):
-    stale = datetime.now() - timedelta(hours=7)
+    stale = datetime.now() - _STALE
     sheet = _sheet_with_history([_history_row("Widget", stale)], ["Widget"])
     _monitor(sheet, searcher, logger).update()
     assert searcher.swept == ["Widget"]
 
 
 def test_update_sweeps_an_item_with_no_history_at_all(logger, searcher):
-    recent = datetime.now() - timedelta(hours=1)
+    recent = datetime.now() - _FRESH
     sheet = _sheet_with_history([_history_row("Widget", recent)], ["Widget", "Gadget"])
     _monitor(sheet, searcher, logger).update()
     assert searcher.swept == ["Gadget"]
 
 
 def test_force_re_sweeps_everything_regardless_of_recency(logger, searcher):
-    recent = datetime.now() - timedelta(hours=1)
+    recent = datetime.now() - _FRESH
     sheet = _sheet_with_history([_history_row("Widget", recent)], ["Widget"])
     _monitor(sheet, searcher, logger).update(force=True)
     assert searcher.swept == ["Widget"]
@@ -286,7 +294,7 @@ def test_force_re_sweeps_everything_regardless_of_recency(logger, searcher):
 def test_a_failed_check_still_holds_off_the_next_one(logger, searcher):
     """A not_found sweep spent an API call just as an ok one did, so it must
     count as a check — otherwise a failing item is retried on every run."""
-    recent = datetime.now() - timedelta(hours=1)
+    recent = datetime.now() - _FRESH
     row = _history_row("Widget", recent, price=None, status="not_found")
     sheet = _sheet_with_history([row], ["Widget"])
     _monitor(sheet, searcher, logger).update()
@@ -296,7 +304,7 @@ def test_a_failed_check_still_holds_off_the_next_one(logger, searcher):
 def test_recency_uses_the_newest_row_not_the_last_one(logger, searcher):
     """Rows can land out of order; the most recent check is what matters."""
     rows = [
-        _history_row("Widget", datetime.now() - timedelta(hours=1)),
+        _history_row("Widget", datetime.now() - _FRESH),
         _history_row("Widget", datetime.now() - timedelta(hours=9)),
     ]
     _monitor(_sheet_with_history(rows, ["Widget"]), searcher, logger).update()
@@ -313,7 +321,7 @@ def test_an_unparseable_timestamp_does_not_suppress_a_refresh(logger, searcher):
 
 
 def test_skipping_every_item_writes_nothing(logger, searcher):
-    recent = datetime.now() - timedelta(hours=1)
+    recent = datetime.now() - _FRESH
     sheet = _sheet_with_history([_history_row("Widget", recent)], ["Widget"])
     before = len(sheet.tabs["Prices"])
     _monitor(sheet, searcher, logger).update()
@@ -322,8 +330,8 @@ def test_skipping_every_item_writes_nothing(logger, searcher):
 
 def test_poll_still_sweeps_a_brand_new_item(logger, searcher):
     """poll() handles items with no history, so the recency filter must not
-    reach it — a newly added item is priced immediately, not in six hours."""
-    recent = datetime.now() - timedelta(hours=1)
+    reach it — a newly added item is priced now, not at the next refresh."""
+    recent = datetime.now() - _FRESH
     sheet = _sheet_with_history([_history_row("Widget", recent)], ["Widget", "Gadget"])
     sheet.modified = True
     _monitor(sheet, searcher, logger).poll()
@@ -488,7 +496,7 @@ def test_once_still_tears_down_the_msg_client(monkeypatch):
 def _seed(item: str, prices: list[float]) -> list[dict[str, str]]:
     """Prior priced sweeps for ``item`` — new_drop_band stays silent below
     _MIN_READINGS, so a drop test needs a settled baseline."""
-    old = datetime.now() - timedelta(hours=7)
+    old = datetime.now() - _STALE
     return [
         _history_row(item, old - timedelta(hours=len(prices) - i), price=price)
         for i, price in enumerate(prices)
