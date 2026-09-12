@@ -142,7 +142,7 @@ class MarketSearcher:
         # `is`, not `==`: two candidates can share every field value, and only
         # the object actually chosen carries the right VAT note.
         winner_vat_note = next(n for c, n in pairs if c is cheapest_pick)
-        value, reason = score(candidates, urls)
+        value, reason = score(candidates, cheapest_pick, urls)
 
         status = PriceStatus.OK
         note = reason
@@ -186,8 +186,8 @@ class MarketSearcher:
             if not isinstance(raw, dict):
                 continue
 
-            price, failure, vat_note = normalise_price(raw, self._ctrl)
-            if failure is not None or price is None:
+            price, vat_note = normalise_price(raw, self._ctrl)
+            if price is None:
                 continue
             if raw.get("in_stock", True) is False:
                 continue

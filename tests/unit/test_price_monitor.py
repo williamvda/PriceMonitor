@@ -495,7 +495,7 @@ def test_once_still_tears_down_the_msg_client(monkeypatch):
 
 def _seed(item: str, prices: list[float]) -> list[dict[str, str]]:
     """Prior priced sweeps for ``item`` — new_drop_band stays silent below
-    _MIN_READINGS, so a drop test needs a settled baseline."""
+    PriceCtrl.min_readings, so a drop test needs a settled baseline."""
     old = datetime.now() - _STALE
     return [
         _history_row(item, old - timedelta(hours=len(prices) - i), price=price)

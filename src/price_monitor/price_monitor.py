@@ -71,9 +71,7 @@ class PriceMonitor:
         )
 
         self.ctrl: PriceCtrl = config.price_ctrl
-        gsheet: MonitoredSheetInterface = GoogleSheetInterface(
-            config=config.drive_config, logger=logger
-        )
+        gsheet = GoogleSheetInterface(config=config.drive_config, logger=logger)
         self._init_parts(
             gsheet=gsheet,
             searcher=MarketSearcher(config.llm_config, config.price_ctrl, logger),
@@ -195,7 +193,11 @@ class PriceMonitor:
             stats = baseline.get(reading.item)
             if stats is None or reading.cheapest is None:
                 continue
-            if not stats.new_drop_band(reading.cheapest.price, self.ctrl.drop_step):
+            if not stats.new_drop_band(
+                reading.cheapest.price,
+                self.ctrl.drop_step,
+                self.ctrl.min_readings,
+            ):
                 continue
             if (
                 reading.confidence is None

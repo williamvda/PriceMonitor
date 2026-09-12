@@ -2,8 +2,7 @@
 
 from datetime import datetime
 
-import pytest
-
+from price_monitor.app_config import PriceCtrl
 from price_monitor.models import Detection, Item, PriceReading, PriceStats, PriceStatus
 
 
@@ -63,6 +62,7 @@ def test_a_reading_carries_all_three_detections():
 
 
 STEP = 0.05
+MIN_READINGS = PriceCtrl().min_readings
 
 
 def _stats(mean: float, last: float, count: int = 4) -> PriceStats:
@@ -70,59 +70,50 @@ def _stats(mean: float, last: float, count: int = 4) -> PriceStats:
 
 
 def test_a_price_crossing_below_the_mean_enters_the_first_band():
-    assert _stats(mean=100.0, last=105.0).new_drop_band(99.0, STEP) == 1
+    assert _stats(mean=100.0, last=105.0).new_drop_band(99.0, STEP, MIN_READINGS) == 1
 
 
 def test_a_price_holding_its_band_is_not_a_new_drop():
     """The next refresh must not re-announce a drop already reported."""
-    assert _stats(mean=100.0, last=99.0).new_drop_band(98.0, STEP) == 0
+    assert _stats(mean=100.0, last=99.0).new_drop_band(98.0, STEP, MIN_READINGS) == 0
 
 
 def test_a_price_falling_into_a_deeper_band_is_a_new_drop():
     """A slow slide keeps reporting, one message per step it gives up."""
-    assert _stats(mean=100.0, last=99.0).new_drop_band(94.0, STEP) == 2
+    assert _stats(mean=100.0, last=99.0).new_drop_band(94.0, STEP, MIN_READINGS) == 2
 
 
 def test_each_further_step_down_opens_another_band():
-    assert _stats(mean=100.0, last=94.0).new_drop_band(89.0, STEP) == 3
+    assert _stats(mean=100.0, last=94.0).new_drop_band(89.0, STEP, MIN_READINGS) == 3
 
 
 def test_a_price_level_with_the_mean_has_not_dropped():
-    assert _stats(mean=100.0, last=105.0).new_drop_band(100.0, STEP) == 0
+    assert _stats(mean=100.0, last=105.0).new_drop_band(100.0, STEP, MIN_READINGS) == 0
 
 
 def test_a_price_recovering_to_the_mean_re_arms_the_alert():
-    assert _stats(mean=100.0, last=100.0).new_drop_band(90.0, STEP) == 3
+    assert _stats(mean=100.0, last=100.0).new_drop_band(90.0, STEP, MIN_READINGS) == 3
 
 
 def test_two_readings_are_too_little_history_to_alert_on():
     """A mean built from one or two readings tracks jitter, not a baseline."""
-    assert _stats(mean=100.0, last=105.0, count=2).new_drop_band(90.0, STEP) == 0
+    assert (
+        _stats(mean=100.0, last=105.0, count=2).new_drop_band(90.0, STEP, MIN_READINGS)
+        == 0
+    )
 
 
 def test_three_readings_are_enough_history_to_alert_on():
-    assert _stats(mean=100.0, last=105.0, count=3).new_drop_band(90.0, STEP) == 3
+    assert (
+        _stats(mean=100.0, last=105.0, count=3).new_drop_band(90.0, STEP, MIN_READINGS)
+        == 3
+    )
 
 
 def test_a_wider_step_puts_the_same_fall_in_a_shallower_band():
     stats = _stats(mean=100.0, last=99.0)
-    assert stats.new_drop_band(89.0, 0.05) == 3
-    assert stats.new_drop_band(89.0, 0.10) == 2
-
-
-@pytest.mark.parametrize(
-    "url, expected",
-    [
-        ("https://www.argos.co.uk/product/123", "argos.co.uk"),
-        ("https://argos.co.uk/product/123", "argos.co.uk"),
-        ("http://SHOP.Example/x", "shop.example"),
-        ("", ""),
-    ],
-)
-def test_supplier_domain_strips_scheme_and_www(url, expected):
-    from price_monitor.models import supplier_domain
-
-    assert supplier_domain(url) == expected
+    assert stats.new_drop_band(89.0, 0.05, MIN_READINGS) == 3
+    assert stats.new_drop_band(89.0, 0.10, MIN_READINGS) == 2
 
 
 def test_detection_carries_price_site_and_rating():

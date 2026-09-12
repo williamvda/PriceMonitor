@@ -12,6 +12,7 @@ import pandas as pd
 from py_utils.logger import get_child_logger
 
 from price_monitor.models import Item
+from price_monitor.sheets.history_tab import SUMMARY_COLUMNS
 from price_monitor.sheets.protocol import SheetInterface
 
 # `last_checked` MUST stay last, for the same reason `status` anchors the
@@ -21,23 +22,10 @@ from price_monitor.sheets.protocol import SheetInterface
 # column from `rated_price` to `sources` is blank for an item that has never
 # been swept, so `last_checked` — always "never" or a timestamp — is the only
 # thing holding such a row's width. It is not cosmetic and must not be moved.
-COLUMNS = [
-    "item",
-    "rated_price",
-    "rated_site",
-    "rated_rating",
-    "cheapest_price",
-    "cheapest_site",
-    "cheapest_rating",
-    "value_price",
-    "value_site",
-    "value_rating",
-    "min",
-    "mean",
-    "confidence",
-    "sources",
-    "last_checked",
-]
+# Imported, not retyped: summarise() produces exactly this shape and
+# write_summary() writes it verbatim, so a second copy could only drift.
+COLUMNS = SUMMARY_COLUMNS
+
 _SUMMARY_FIELDS = COLUMNS[1:-1]
 
 

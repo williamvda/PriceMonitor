@@ -53,6 +53,10 @@ class PriceCtrl:
     # announced once per band it gives up, so a slow slide keeps reporting
     # without a message on every refresh. 0.05 = one message per 5% lost.
     drop_step: float = 0.05
+    # The other half of the drop rule: below this many recorded sweeps the mean
+    # tracks jitter rather than a settled price, so a "drop" against it would
+    # say nothing. At the default 24h refresh a new item is quiet for 3 days.
+    min_readings: int = 3
     # A sweep below this confidence is recorded but never announced.
     # Corroboration alone caps a single-source sweep at 0.33, so this threshold
     # is also what decides that one retailer is not a market.

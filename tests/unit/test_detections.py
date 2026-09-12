@@ -1,7 +1,9 @@
 """Unit tests for selecting a sweep's three answers."""
 
+import pytest
+
 from price_monitor.search.confidence import Candidate
-from price_monitor.search.detections import select, to_detection
+from price_monitor.search.detections import select, supplier_domain, to_detection
 
 PREMIUM = 0.05
 
@@ -209,3 +211,16 @@ def test_best_value_ties_break_toward_the_cheaper():
     ]
     _, _, best_value = select(cands, PREMIUM)
     assert best_value.price == 103.0
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://www.argos.co.uk/product/123", "argos.co.uk"),
+        ("https://argos.co.uk/product/123", "argos.co.uk"),
+        ("http://SHOP.Example/x", "shop.example"),
+        ("", ""),
+    ],
+)
+def test_supplier_domain_strips_scheme_and_www(url, expected):
+    assert supplier_domain(url) == expected

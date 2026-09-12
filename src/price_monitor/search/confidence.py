@@ -1,4 +1,4 @@
-"""Confidence scoring for a market sweep.
+"""The :class:`Candidate` value object and the confidence score built from it.
 
 Grades a set of retailer candidates on how well it supports the claim "this is
 the best UK price" — not on whether the winning number was read correctly. Pure:
@@ -48,18 +48,24 @@ class Candidate:
         return f"{self.rating:.1f} {self.rating_source.capitalize()}".strip()
 
 
-def score(candidates: list[Candidate], cited_urls: list[str]) -> tuple[float, str]:
+def score(
+    candidates: list[Candidate], winner: Candidate | None, cited_urls: list[str]
+) -> tuple[float, str]:
     """Score the sweep in ``[0, 1]`` and explain the score in one line.
+
+    ``winner`` is the candidate the sweep actually recorded as cheapest. It is
+    passed in rather than re-derived here: `detections.select` breaks a price
+    tie by rating, and a second `min` with a different tie-break would score
+    the sourcing factor against a retailer other than the one on the sheet.
 
     The three factors multiply rather than average, so one bad signal drags the
     result down whatever the others say. That is the right shape for a metric
     whose job is to catch mistakes, and it means a single-source sweep cannot
     exceed 0.33 however good its one source looks.
     """
-    if not candidates:
+    if not candidates or winner is None:
         return 0.0, "no candidates"
 
-    winner = min(candidates, key=lambda c: c.price)
     corroboration = min(len(candidates) / _TARGET_SOURCES, 1.0)
     outlier, outlier_reason = _outlier(candidates, winner)
     sourcing, sourcing_reason = _sourcing(winner, cited_urls)

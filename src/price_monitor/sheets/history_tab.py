@@ -18,6 +18,13 @@ from price_monitor.sheets.protocol import SheetInterface
 
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+_DETECTION_PREFIXES = ("rated", "cheapest", "value")
+_DETECTION_FIELDS = [
+    f"{prefix}_{suffix}"
+    for prefix in _DETECTION_PREFIXES
+    for suffix in ("price", "site", "rating")
+]
+
 # `status` MUST stay last. The Sheets API omits trailing empty cells from each
 # row, and when every row in a read comes back short, pandas does not pad —
 # it raises inside GoogleSheetInterface.read() before this module ever sees
@@ -29,44 +36,24 @@ TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 COLUMNS = [
     "timestamp",
     "item",
-    "rated_price",
-    "rated_site",
-    "rated_rating",
-    "cheapest_price",
-    "cheapest_site",
-    "cheapest_rating",
-    "value_price",
-    "value_site",
-    "value_rating",
+    *_DETECTION_FIELDS,
     "confidence",
     "sources",
     "note",
     "status",
 ]
 
+# The Items tab's layout, produced by summarise() and written verbatim by
+# ItemsTab. Defined here beside the history it is derived from; items_tab
+# imports it rather than keeping a second copy that could drift.
 SUMMARY_COLUMNS = [
     "item",
-    "rated_price",
-    "rated_site",
-    "rated_rating",
-    "cheapest_price",
-    "cheapest_site",
-    "cheapest_rating",
-    "value_price",
-    "value_site",
-    "value_rating",
+    *_DETECTION_FIELDS,
     "min",
     "mean",
     "confidence",
     "sources",
     "last_checked",
-]
-
-_DETECTION_PREFIXES = ("rated", "cheapest", "value")
-_DETECTION_FIELDS = [
-    f"{prefix}_{suffix}"
-    for prefix in _DETECTION_PREFIXES
-    for suffix in ("price", "site", "rating")
 ]
 
 
@@ -116,15 +103,7 @@ class HistoryTab:
 
     def last_prices(self) -> dict[str, float]:
         """Most recent non-null cheapest price for each item."""
-        frame = self._typed()
-        prices: dict[str, float] = {}
-        if frame.empty:
-            return prices
-        priced = frame[frame["cheapest_price"].notna()]
-        for item, group in priced.groupby("item", sort=False):
-            ordered = group.sort_values("timestamp", kind="stable")
-            prices[item] = float(ordered["cheapest_price"].iloc[-1])
-        return prices
+        return {item: stats.last for item, stats in self.price_stats().items()}
 
     def price_stats(self) -> dict[str, PriceStats]:
         """Mean, most recent cheapest price, and reading count per item.

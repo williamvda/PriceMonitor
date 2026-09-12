@@ -3,20 +3,15 @@
 Defines the tracked :class:`Item`, the :class:`Detection` naming one retailer's
 offer, and the :class:`PriceReading` recorded for it on each run, the
 :class:`PriceStatus` describing how that reading turned out, and the
-:class:`PriceStats` summarising an item's history so far. Exports the
-:func:`supplier_domain` utility that renders a candidate's URL as a site.
+:class:`PriceStats` summarising an item's history so far.
+
+These are the value objects that cross the search -> sheets -> notifier
+boundary, which is why they live here rather than in any one layer.
 """
 
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from urllib.parse import urlparse
-
-
-def supplier_domain(url: str) -> str:
-    """The bare domain of ``url``, as a :class:`Detection`'s ``site`` value."""
-    netloc = urlparse(url.strip()).netloc.lower()
-    return netloc[4:] if netloc.startswith("www.") else netloc
 
 
 class PriceStatus(str, Enum):
@@ -25,8 +20,6 @@ class PriceStatus(str, Enum):
     OK = "ok"
     SUSPECT = "suspect"
     NOT_FOUND = "not_found"
-    WRONG_CURRENCY = "wrong_currency"
-    REJECTED = "rejected"
     PARSE_ERROR = "parse_error"
     ERROR = "error"
 
@@ -74,9 +67,6 @@ class PriceReading:
 
 # Below this many readings the mean tracks jitter rather than a settled price,
 # so a "drop" against it says nothing useful.
-_MIN_READINGS = 3
-
-
 @dataclass(frozen=True)
 class PriceStats:
     """An item's priced history summarised, as the baseline for the next reading."""
@@ -85,7 +75,7 @@ class PriceStats:
     last: float
     count: int
 
-    def new_drop_band(self, price: float, step: float) -> int:
+    def new_drop_band(self, price: float, step: float, min_readings: int) -> int:
         """The deeper band ``price`` has just entered, or 0 if it has not.
 
         Bands sit at the mean and every ``step`` below it, so band 1 is the
@@ -96,7 +86,7 @@ class PriceStats:
         prices are measured against the same mean — the one from before this
         reading was recorded.
         """
-        if self.count < _MIN_READINGS:
+        if self.count < min_readings:
             return 0
         band = self._band(price, step)
         return band if band > self._band(self.last, step) else 0
