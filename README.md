@@ -194,6 +194,35 @@ the best price across all UK suppliers", and one shop answering is not a
 market. If you deliberately track such niche items, lower `min_confidence`
 to about 0.3 rather than changing anything about the scorer itself.
 
+#### Ratings come from a cache, not the sweep
+
+An earlier version of the sweep prompt asked, for every retailer it found,
+"report its Trustpilot rating out of 5 and how many reviews that rating is
+based on." Live logs showed what that cost: a sweep pricing an Epson printer
+spent two of its six grounding passages reading `trustpilot.com` rather than
+looking for a retailer. Those passages are wanted for finding shops, and
+breadth — how many retailers a sweep turns up — is already this feature's
+weakest point.
+
+The request was also inconsistent. Across three runs of the same query an
+hour apart, one retailer came back as `4.0 Trustpilot`, then `4.2 Google`,
+then `4.2 Trustpilot` — the model re-decides its rating source every time it
+is asked, so asking on every sweep bought jitter, not freshness. Ratings also
+move over months, not days, so paying their cost on every daily sweep priced
+a slow-changing fact at a daily rate.
+
+Ratings now live in their own [Ratings tab](#the-ratings-tab), filled by a
+batched lookup on its own slow cadence, and the sweep prompt no longer
+mentions them at all. This is described honestly, not as a pure win: on a
+first run every retailer is unrated, so `rated_price` and `value_price` are
+blank across the board until the cache fills, and once it has, a rating a
+detection shows can be up to `rating_rate_d` days old (default 30) rather
+than the sweep's own fresh guess. A stored rating being older is the point,
+not a shortcoming — see the Ratings tab section for why that is more stable,
+not merely cheaper. Whether the grounding passages this frees up actually
+turn into more retailers found is a hypothesis this change has not yet been
+validated against a live run.
+
 #### When a sweep finds only one retailer
 
 The `sources` column counts the retailers a sweep actually found — meaning
@@ -241,6 +270,59 @@ and says so, both in the log and as a message if `--msg-server` is on.
 last column. The Sheets API drops trailing empty cells, and a column that is
 filled once and later cleared makes every row short — which makes the whole tab
 unreadable.
+
+### The Ratings tab
+
+A fourth tab, named by `ratings_sheet` (`Ratings` by default), caches one
+review rating per retailer so the sweep does not have to ask for it. See
+[Ratings come from a cache, not the sweep](#ratings-come-from-a-cache-not-the-sweep)
+for why it was moved out of the sweep in the first place.
+
+| Column | Owner | Meaning |
+| --- | --- | --- |
+| `site` | tool | Bare domain, as `supplier_domain` renders it. |
+| `rating` | tool | Score out of 5. Blank when none was found. |
+| `reviews` | tool | Review count behind that score. Blank when none was found. |
+| `source` | tool | `trustpilot` or `google`. Blank when none was found. |
+| `checked` | tool | Date of the last lookup attempt. Blank if the site has only ever been registered, never looked up. |
+
+As with the Control tab, **`checked` must stay last.** The Sheets API drops
+trailing empty cells, and `rating`, `reviews` and `source` are all blank for a
+site that has been registered but not yet rated — `checked` is the only
+column certain to carry a value once a lookup has actually run, so it has to
+anchor the row.
+
+The tab is tool-written, but it is deliberately plain enough to hand-edit: if
+you know a rating is wrong, correct it directly in the sheet. That matters
+because the model has reported the same retailer three different ways across
+three runs of the same query (`4.0 Trustpilot`, then `4.2 Google`, then
+`4.2 Trustpilot`) — a corrected value is a legitimate way to settle a
+disagreement you trust more than the model's last answer. Staleness is judged
+on `checked` alone, not on whether `rating` looks sensible, so a correction
+survives only until `checked` next qualifies as stale under `rating_rate_d`;
+bump `checked` to today yourself if you want it to hold for a full cycle. A
+hand-typed rating outside `0`–`5` is treated the same as no rating at all, so
+a typo cannot manufacture a bogus best-rated winner.
+
+A row with a `checked` date and a blank `rating` means "we asked, and there
+was nothing to find" — a retailer with no Trustpilot or Google presence.
+That is deliberately different from a site being absent from the tab
+entirely, which means "never asked". Without that distinction an unrated
+retailer would be looked up again on every single refresh, forever, instead
+of being left alone until `rating_rate_d` makes it worth asking again.
+
+A retailer only reaches the tab once a sweep has actually found it as a
+surviving candidate — the cache does not pre-populate from a list you supply.
+Each refresh rates up to ten retailers, whichever are never-checked or older
+than `rating_rate_d` (default 30 days), so a freshly started cache against,
+say, fifty retailers fills over roughly five days rather than spending fifty
+billed searches at once. On a first run every retailer is unrated, so
+`rated_price` and `value_price` are blank across the whole Items tab until
+the cache has had time to fill.
+
+A retailer the sweep has seen but which has no cached rating yet still
+competes on price — it can still win `cheapest_price` — it simply cannot be
+the best-rated or best-value detection until a later refresh has rated it.
 
 ## The sheet
 
