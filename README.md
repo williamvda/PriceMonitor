@@ -65,6 +65,22 @@ site and rating:
 | **Cheapest** | Of every candidate that survived, which is cheapest? |
 | **Best value** | Of the rated retailers, which is the best compromise between price and rating? |
 
+`cheapest_*` reports the best price seen in the last `best_window_days`
+(7 by default), not the latest sweep's — one sweep is a weak sample, and the
+same query has returned three retailers on one run and one on the next.
+`cheapest_seen` dates it. The other two detections stay from the latest sweep,
+since "best-rated in the last week" is not a meaningful thing to want, so one
+row does mix two timeframes.
+
+A sweep that finds fewer retailers than that item managed inside the same
+window is swept once more, and only the better of the two is recorded. That
+costs one extra billed search on a result that looks wrong for that item; set
+`resweep_thin` to `false` to turn it off.
+
+When a sweep disappoints — low confidence, or any status but `ok`/`suspect` —
+its raw report is kept under `<secrets>/reports` so a thin result can be
+diagnosed without paying to reproduce it. `report_keep_days` (30) prunes them.
+
 Only the cheapest series is tracked over time — `min`, `mean` and drop
 notifications all run against `cheapest_price` alone, because it is the one
 quantity with a meaningful trend. The best-rated retailer's price says more
@@ -199,6 +215,33 @@ these rows at a glance. A blank means the item has never been swept; a `0`
 never appears, because a sweep that found nothing records no count at all —
 `status` on the Prices tab says what went wrong instead.
 
+### The Control tab
+
+A third tab, named by `control_sheet` (`Control` by default), holds settings
+easier to manage from the spreadsheet than from a config file. One column per
+control; today that is `blocked`.
+
+| `blocked` |
+|---|
+| amazon.co.uk |
+| temu |
+
+One retailer per row, as a domain or a bare brand name — `amazon` and
+`amazon.co.uk` both match. Blocked retailers are dropped before ranking and do
+not count toward `sources`, since a shop you would not buy from is not
+corroboration.
+
+PriceMonitor creates the tab empty on the first run that finds it missing, the
+same way it creates `Items` and `Prices`. If the tab exists but cannot be read
+it is **never** overwritten — `write()` clears before it writes, and doing that
+would destroy your settings. Instead the run continues with no controls applied
+and says so, both in the log and as a message if `--msg-server` is on.
+
+**One constraint if you add your own columns:** at least one row must reach the
+last column. The Sheets API drops trailing empty cells, and a column that is
+filled once and later cleared makes every row short — which makes the whole tab
+unreadable.
+
 ## The sheet
 
 PriceMonitor expects a Google Sheet with two tabs, named by `items_sheet`
@@ -217,6 +260,7 @@ Column A (`item`) is yours; every column after it is rewritten on every run.
 | `cheapest_price` | tool | The cheapest detection's price. |
 | `cheapest_site` | tool | Its retailer's domain. |
 | `cheapest_rating` | tool | Its rating; blank when that retailer is unrated. |
+| `cheapest_seen` | tool | The date that best price was seen. |
 | `value_price` | tool | The best-value detection's price. See [The best-value rule](#the-best-value-rule) — this can exceed `cheapest_price`. |
 | `value_site` | tool | Its retailer's domain. |
 | `value_rating` | tool | Its rating. |

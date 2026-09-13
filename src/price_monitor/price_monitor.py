@@ -15,6 +15,7 @@ import signal
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from price_monitor.msgserver_client.msg_forwarder import (
     format_startup_message,
 )
 from price_monitor.search.market import MarketSearcher
+from price_monitor.sheets.control_tab import ControlTab
 from price_monitor.sheets.history_tab import HistoryTab
 from price_monitor.sheets.items_tab import ItemsTab
 from price_monitor.sheets.protocol import MonitoredSheetInterface
@@ -74,7 +76,12 @@ class PriceMonitor:
         gsheet = GoogleSheetInterface(config=config.drive_config, logger=logger)
         self._init_parts(
             gsheet=gsheet,
-            searcher=MarketSearcher(config.llm_config, config.price_ctrl, logger),
+            searcher=MarketSearcher(
+                config.llm_config,
+                config.price_ctrl,
+                logger,
+                report_dir=secrets / "reports",
+            ),
         )
 
     @classmethod
@@ -88,10 +95,10 @@ class PriceMonitor:
         monitor = cls.__new__(cls)
         monitor.logger = get_child_logger(logger, cls.__name__)
         monitor.ctrl = PriceCtrl(request_delay_s=0.0)
-        monitor._init_parts(gsheet=gsheet, searcher=searcher)
         monitor.root_logger = logger
         monitor.msg_client = None
         monitor.notifier = MsgNotifier(client=None, logger=monitor.logger)
+        monitor._init_parts(gsheet=gsheet, searcher=searcher)
         return monitor
 
     def _init_parts(
@@ -102,6 +109,12 @@ class PriceMonitor:
         self._searcher = searcher
         self.items_tab = ItemsTab(gsheet, self.ctrl.items_sheet, self.logger)
         self.history = HistoryTab(gsheet, self.ctrl.history_sheet, self.logger)
+        self.control_tab = ControlTab(
+            gsheet,
+            self.ctrl.control_sheet,
+            self.logger,
+            notify=self.notifier.notify,
+        )
         self._gsheet = gsheet
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name="PriceMonitor")
@@ -190,7 +203,8 @@ class PriceMonitor:
             readings = self._price_all(items)
             self.history.append(readings)
             self.items_tab.write_summary(
-                self.items_tab.read(), self.history.summarise()
+                self.items_tab.read(),
+                self.history.summarise(self.ctrl.best_window_days),
             )
         except Exception as exc:
             self.notifier.notify(format_check_failed(label, exc))
@@ -242,17 +256,60 @@ class PriceMonitor:
 
     def _price_all(self, items: list[Item]) -> list[PriceReading]:
         last_prices = self.history.last_prices()
+        blocked = self.control_tab.blocked()
+        source_high = (
+            self.history.recent_source_high(self.ctrl.best_window_days)
+            if self.ctrl.resweep_thin
+            else {}
+        )
         readings: list[PriceReading] = []
         for index, item in enumerate(items):
             if index and self.ctrl.request_delay_s:
                 self.stop_event.wait(self.ctrl.request_delay_s)
-            readings.append(self._sweep_one(item, last_prices.get(item.name)))
+            last = last_prices.get(item.name)
+            reading = self._sweep_one(item, last, blocked)
+            readings.append(
+                self._resweep_if_thin(reading, item, last, blocked, source_high)
+            )
         return readings
 
-    def _sweep_one(self, item: Item, last_price: float | None) -> PriceReading:
+    def _resweep_if_thin(
+        self,
+        reading: PriceReading,
+        item: Item,
+        last_price: float | None,
+        blocked: set[str],
+        source_high: dict[str, int],
+    ) -> PriceReading:
+        """Sweep once more when a result is thin for this item, and keep the better.
+
+        Judged against the item's own recent best rather than a fixed bar, so a
+        product genuinely sold by one shop never retries. Only the better
+        reading is recorded: appending both would double that item's history
+        and drag its mean toward a result we already believe is wrong.
+        """
+        high = source_high.get(item.name)
+        if reading.sources is None or high is None or reading.sources >= high:
+            return reading
+
+        self.logger.info(
+            f"'{item.name}' found {reading.sources} retailer(s) against a recent "
+            f"best of {high}; sweeping once more."
+        )
+        if self.ctrl.request_delay_s:
+            self.stop_event.wait(self.ctrl.request_delay_s)
+        retry = self._sweep_one(item, last_price, blocked)
+        if (retry.sources or 0) <= reading.sources:
+            return reading
+        note = f"{retry.note}; retried after a thin sweep found {reading.sources}"
+        return replace(retry, note=note.lstrip("; "))
+
+    def _sweep_one(
+        self, item: Item, last_price: float | None, blocked: set[str]
+    ) -> PriceReading:
         timestamp = datetime.now().replace(microsecond=0)
         try:
-            return self._searcher.price_market(item, last_price, timestamp)
+            return self._searcher.price_market(item, last_price, timestamp, blocked)
         except Exception as exc:
             # One failed sweep must never abort the rest of the run.
             self.logger.warning(f"Sweep for '{item.name}' failed: {exc}")

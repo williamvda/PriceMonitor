@@ -2,7 +2,8 @@
 
 import json
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 
 import pytest
 from llmbridge.exceptions import LLMConnectionError
@@ -80,7 +81,7 @@ def _assert_no_detections(reading) -> None:
     assert reading.best_value is None
 
 
-def _searcher(logger, candidates, note="") -> MarketSearcher:
+def _searcher(logger, candidates, note="", report_dir=None) -> MarketSearcher:
     payload = json.dumps({"candidates": candidates, "note": note})
     return MarketSearcher(
         LLMConfig(api_key="k"),
@@ -88,6 +89,7 @@ def _searcher(logger, candidates, note="") -> MarketSearcher:
         logger,
         search_client=FakeClient(_response("a prose report")),
         format_client=FakeClient(_response(payload)),
+        report_dir=report_dir,
     )
 
 
@@ -518,3 +520,83 @@ def test_a_missing_sign_off_leaves_the_sweep_alone(logger):
     assert reading.status == PriceStatus.OK
     assert reading.cheapest.price == 100.0
     assert "retailers reported" not in reading.note
+
+
+def test_a_blocked_retailer_never_wins(logger):
+    searcher = _searcher(
+        logger,
+        [
+            _candidate(price=50.0, url="https://www.amazon.co.uk/dp/X"),
+            _candidate(price=100.0, url="https://argos.co.uk/w"),
+        ],
+    )
+    reading = searcher.price_market(ITEM, None, NOW, blocked={"amazon.co.uk"})
+    assert reading.cheapest.site == "argos.co.uk"
+
+
+def test_a_blocked_retailer_does_not_count_toward_sources(logger):
+    """It is not a retailer you would buy from, so it is not corroboration."""
+    searcher = _searcher(
+        logger,
+        [
+            _candidate(price=50.0, url="https://amazon.co.uk/dp/X"),
+            _candidate(price=100.0, url="https://argos.co.uk/w"),
+        ],
+    )
+    assert searcher.price_market(ITEM, None, NOW, blocked={"amazon.co.uk"}).sources == 1
+
+
+def test_a_bare_brand_name_blocks_the_whole_domain(logger):
+    searcher = _searcher(logger, [_candidate(price=50.0, url="https://amazon.co.uk/x")])
+    reading = searcher.price_market(ITEM, None, NOW, blocked={"amazon"})
+    assert reading.status == PriceStatus.NOT_FOUND
+
+
+def test_nothing_is_blocked_by_default(logger):
+    searcher = _searcher(logger, [_candidate(price=50.0, url="https://amazon.co.uk/x")])
+    assert searcher.price_market(ITEM, None, NOW).cheapest.price == 50.0
+
+
+def test_a_disappointing_sweep_keeps_its_report(logger, tmp_path):
+    """Diagnosing a thin result should not cost another billed search."""
+    searcher = _searcher(logger, [_candidate(price=100.0)], report_dir=tmp_path)
+    searcher.price_market(ITEM, None, NOW)
+    kept = list(tmp_path.glob("*.txt"))
+    assert len(kept) == 1
+    assert "a prose report" in kept[0].read_text()
+
+
+def test_a_confident_sweep_keeps_nothing(logger, tmp_path):
+    """Retention is for the results you would otherwise have to re-run."""
+    searcher = _searcher(
+        logger,
+        [_candidate(price=100.0, url=f"https://a{n}.co.uk/w") for n in range(4)],
+        report_dir=tmp_path,
+    )
+    reading = searcher.price_market(ITEM, None, NOW)
+    assert reading.confidence is not None and reading.confidence >= 0.5
+    assert list(tmp_path.glob("*.txt")) == []
+
+
+def test_a_failed_sweep_keeps_its_report(logger, tmp_path):
+    searcher = _searcher(logger, [], report_dir=tmp_path)
+    assert searcher.price_market(ITEM, None, NOW).status == PriceStatus.NOT_FOUND
+    assert len(list(tmp_path.glob("*.txt"))) == 1
+
+
+def test_reports_older_than_the_keep_window_are_pruned(logger, tmp_path):
+    """A long-running process must not fill the disk."""
+    stale = tmp_path / "old-report.txt"
+    stale.write_text("ancient")
+    old = (datetime.now() - timedelta(days=90)).timestamp()
+    os.utime(stale, (old, old))
+
+    searcher = _searcher(logger, [_candidate(price=100.0)], report_dir=tmp_path)
+    searcher.price_market(ITEM, None, NOW)
+    assert not stale.exists()
+
+
+def test_retention_is_off_when_no_directory_is_configured(logger):
+    """Nothing is written, and nothing raises."""
+    searcher = _searcher(logger, [_candidate(price=100.0)])
+    assert searcher.price_market(ITEM, None, NOW).status == PriceStatus.OK

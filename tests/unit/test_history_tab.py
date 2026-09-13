@@ -1,7 +1,7 @@
 """Tests for the append-only price history tab."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -217,8 +217,13 @@ def test_summarise_computes_min_and_mean_over_the_cheapest_series(logger):
             _row(price="60.0", when="2026-08-20 18:00:00"),
         ]
     )
-    row = HistoryTab(FakeSheet(frame), "Prices", logger).summarise().iloc[0]
-    assert row["cheapest_price"] == 60.0
+    row = (
+        HistoryTab(FakeSheet(frame), "Prices", logger)
+        .summarise(window_days=3650)
+        .iloc[0]
+    )
+    # The best inside the window, not the latest sweep's 60.00.
+    assert row["cheapest_price"] == 50.0
     assert row["min"] == 50.0
     assert row["mean"] == 70.0
     assert row["last_checked"] == "2026-08-20 18:00:00"
@@ -241,7 +246,7 @@ def test_summarise_reports_the_latest_rows_nine_detection_cells(logger):
             ),
         ]
     )
-    row = tab.summarise().iloc[0]
+    row = tab.summarise(window_days=3650).iloc[0]
     assert row["rated_price"] == 140.0
     assert row["rated_site"] == "john-lewis.com"
     assert row["rated_rating"] == "4.6 Trustpilot"
@@ -262,7 +267,11 @@ def test_a_failed_sweep_contributes_nothing_but_a_moving_timestamp(logger):
             _row(price="", when="2026-08-20 12:00:00", status="error"),
         ]
     )
-    row = HistoryTab(FakeSheet(frame), "Prices", logger).summarise().iloc[0]
+    row = (
+        HistoryTab(FakeSheet(frame), "Prices", logger)
+        .summarise(window_days=3650)
+        .iloc[0]
+    )
     assert row["cheapest_price"] == 100.0
     assert row["mean"] == 100.0
     assert row["last_checked"] == "2026-08-20 12:00:00"
@@ -270,7 +279,11 @@ def test_a_failed_sweep_contributes_nothing_but_a_moving_timestamp(logger):
 
 def test_item_with_no_prices_summarises_blank(logger):
     frame = _history([_row(item="Ghost", price="", status="not_found")])
-    row = HistoryTab(FakeSheet(frame), "Prices", logger).summarise().iloc[0]
+    row = (
+        HistoryTab(FakeSheet(frame), "Prices", logger)
+        .summarise(window_days=3650)
+        .iloc[0]
+    )
     assert row["cheapest_price"] == ""
     assert row["rated_price"] == ""
     assert row["min"] == ""
@@ -280,7 +293,7 @@ def test_item_with_no_prices_summarises_blank(logger):
 
 
 def test_summarise_of_empty_history_is_empty(logger):
-    assert HistoryTab(FakeSheet(), "Prices", logger).summarise().empty
+    assert HistoryTab(FakeSheet(), "Prices", logger).summarise(window_days=3650).empty
 
 
 def test_the_items_tab_ends_with_its_own_anchor_column():
@@ -463,3 +476,76 @@ def test_a_failed_sweep_records_no_source_count(logger):
     history = HistoryTab(sheet, "Prices", logger)
     history.append([_reading(price=None, status=PriceStatus.ERROR)])
     assert history.read()["sources"].iloc[0] == ""
+
+
+def _aged(item: str, days_ago: float, price: float) -> dict:
+    when = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d %H:%M:%S")
+    return _row(item=item, when=when, price=f"{price:.2f}")
+
+
+def test_cheapest_reports_the_best_price_inside_the_window(logger):
+    """One sweep is a weak sample — the same query has returned three
+    retailers on one run and one on the next. The window smooths that."""
+    frame = _history([_aged("Widget", 3, 150.0), _aged("Widget", 1, 200.0)])
+    row = (
+        HistoryTab(FakeSheet(frame), "Prices", logger).summarise(window_days=7).iloc[0]
+    )
+    assert row["cheapest_price"] == 150.0
+
+
+def test_a_price_outside_the_window_is_not_reported_as_available(logger):
+    """A bargain from a fortnight ago is not something you can act on."""
+    frame = _history([_aged("Widget", 14, 50.0), _aged("Widget", 1, 200.0)])
+    row = (
+        HistoryTab(FakeSheet(frame), "Prices", logger).summarise(window_days=7).iloc[0]
+    )
+    assert row["cheapest_price"] == 200.0
+
+
+def test_cheapest_seen_dates_the_price_being_reported(logger):
+    frame = _history([_aged("Widget", 3, 150.0), _aged("Widget", 1, 200.0)])
+    row = (
+        HistoryTab(FakeSheet(frame), "Prices", logger).summarise(window_days=7).iloc[0]
+    )
+    expected = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+    assert row["cheapest_seen"] == expected
+
+
+def test_the_other_detections_come_from_the_latest_sweep(logger):
+    """Best-rated in the last week is not a meaningful thing to want, so
+    those columns stay current while cheapest looks back."""
+    frame = _history([_aged("Widget", 3, 150.0), _aged("Widget", 1, 200.0)])
+    row = (
+        HistoryTab(FakeSheet(frame), "Prices", logger).summarise(window_days=7).iloc[0]
+    )
+    assert row["rated_price"] == 200.0
+
+
+def test_min_and_mean_still_span_all_of_history(logger):
+    frame = _history([_aged("Widget", 30, 50.0), _aged("Widget", 1, 200.0)])
+    row = (
+        HistoryTab(FakeSheet(frame), "Prices", logger).summarise(window_days=7).iloc[0]
+    )
+    assert row["min"] == 50.0
+    assert row["mean"] == 125.0
+
+
+def test_an_item_with_nothing_inside_the_window_reports_no_cheapest(logger):
+    frame = _history([_aged("Widget", 30, 50.0)])
+    row = (
+        HistoryTab(FakeSheet(frame), "Prices", logger).summarise(window_days=7).iloc[0]
+    )
+    assert row["cheapest_price"] == ""
+    assert row["cheapest_seen"] == ""
+    assert row["min"] == 50.0
+
+
+def test_recent_source_high_reports_the_best_breadth_in_the_window(logger):
+    frame = _history(
+        [
+            _row(item="Widget", when="2026-09-01 06:00:00", sources="3"),
+            _row(item="Widget", when="2026-09-02 06:00:00", sources="1"),
+        ]
+    )
+    tab = HistoryTab(FakeSheet(frame), "Prices", logger)
+    assert tab.recent_source_high(window_days=3650)["Widget"] == 3
