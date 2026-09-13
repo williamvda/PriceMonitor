@@ -112,6 +112,11 @@ class MarketSearcher:
         ``ratings`` supplies each candidate's rating from the cache, keyed by
         domain: the sweep prompt no longer asks the model for one.
         """
+        # Reset here, not in _candidates: every early-return failure path below
+        # skips _candidates entirely, and one searcher is shared across every
+        # item, so a failed sweep must not leave a previous item's sites for
+        # the caller to keep registering.
+        self.seen_sites = set()
         try:
             searched = retrying(
                 lambda: self._search_client.prompt(market_prompt(item)),
@@ -326,7 +331,6 @@ class MarketSearcher:
         no adjustment), so the winner's note can be preserved without
         carrying VAT fields on :class:`Candidate` itself.
         """
-        self.seen_sites = set()
         candidates: list[tuple[Candidate, str]] = []
         raw_candidates = payload.get("candidates")
         if not isinstance(raw_candidates, list):
@@ -347,7 +351,8 @@ class MarketSearcher:
                 continue
 
             cached = (ratings or {}).get(site, Rating())
-            self.seen_sites.add(site)
+            if site:
+                self.seen_sites.add(site)
             candidate = Candidate(
                 supplier=str(raw.get("supplier") or "").strip(),
                 price=price,

@@ -600,3 +600,37 @@ def test_the_sweep_reports_the_sites_it_kept(logger):
     )
     searcher.price_market(ITEM, None, NOW)
     assert searcher.seen_sites == {"argos.co.uk", "currys.co.uk"}
+
+
+def test_a_failed_sweep_reports_no_sites(logger):
+    """The controller shares one MarketSearcher across every item, so a
+    failed sweep must not leave a previous sweep's sites lingering for a
+    retailer that no longer appears to be wrongly re-registered."""
+    payload = json.dumps(
+        {
+            "candidates": [_candidate(price=100.0, url="https://argos.co.uk/w")],
+            "note": "",
+        }
+    )
+    searcher = MarketSearcher(
+        LLMConfig(api_key="k"),
+        PriceCtrl(),
+        logger,
+        search_client=FakeClient(_response("a prose report"), _response("   ")),
+        format_client=FakeClient(_response(payload)),
+    )
+    searcher.price_market(ITEM, None, NOW)
+    assert searcher.seen_sites == {"argos.co.uk"}
+
+    reading = searcher.price_market(ITEM, None, NOW)
+    assert reading.status == PriceStatus.PARSE_ERROR
+    assert searcher.seen_sites == set()
+
+
+def test_seen_sites_never_records_an_unparseable_domain(logger):
+    """A URL that will not parse must not pollute seen_sites with a blank
+    entry — register() filtering blanks downstream is not a contract this
+    method should rely on."""
+    searcher = _searcher(logger, [_candidate(price=100.0, url="not a url")])
+    searcher.price_market(ITEM, None, NOW)
+    assert "" not in searcher.seen_sites

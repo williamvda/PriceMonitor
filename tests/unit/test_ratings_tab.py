@@ -85,6 +85,16 @@ def test_an_empty_tab_reads_as_no_ratings(logger):
     assert RatingsTab(FakeSheet(), "Ratings", logger).read() == {}
 
 
+def test_a_hand_typed_out_of_range_rating_is_stored_as_none(logger):
+    """A retailer's rating enters from two places — the automated lookup and
+    a human correcting it by hand — and neither can vouch for the other, so
+    the same five-point guard applies to a hand-typed value too."""
+    tab = RatingsTab(
+        FakeSheet(_rows([_row("argos.co.uk", rating="45")])), "Ratings", logger
+    )
+    assert tab.read()["argos.co.uk"].rating is None
+
+
 def test_an_unreadable_tab_returns_none_and_is_never_written(logger):
     """write() clears before it writes, so a tab we cannot read must not be
     touched — it may still hold every rating we have."""

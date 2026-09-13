@@ -18,6 +18,13 @@ from price_monitor.sheets.protocol import SheetInterface
 
 DATE_FORMAT = "%Y-%m-%d"
 
+# A rating enters here from two places — the automated lookup and a human
+# correcting it by hand, which the tab explicitly invites when the model has
+# reported a retailer three different ways. Neither entrance can vouch for the
+# other, so this guard duplicates search/ratings.py's rather than trusting a
+# value that already passed it once.
+_MAX_RATING = 5.0
+
 # `checked` MUST stay last. The Sheets API omits trailing empty cells, and when
 # every row in a read comes back short pandas raises inside
 # GoogleSheetInterface.read() before this module sees it. Every other column is
@@ -47,7 +54,7 @@ class RatingsTab:
             return None
         return {
             site: Rating(
-                rating=_as_float(row["rating"]),
+                rating=_clamped(_as_float(row["rating"])),
                 reviews=_as_int(row["reviews"]),
                 source=str(row["source"] or "").strip(),
             )
@@ -160,6 +167,13 @@ class RatingsTab:
             self._gsheet.write(sheet_name=self._sheet_name, df=frame)
         except Exception as exc:
             self.logger.warning(f"Could not write '{self._sheet_name}': {exc}")
+
+
+def _clamped(rating: float | None) -> float | None:
+    """``rating`` if it is a trustworthy five-point value, else ``None``."""
+    if rating is not None and not (0.0 <= rating <= _MAX_RATING):
+        return None
+    return rating
 
 
 def _as_float(value: object) -> float | None:

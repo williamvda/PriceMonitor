@@ -81,5 +81,6 @@ def test_the_sweep_no_longer_asks_for_ratings():
 
 def test_the_format_schema_no_longer_carries_rating_fields():
     schema = market_format_prompt("report", [])
+    assert "rating" not in schema
     assert "rating_count" not in schema
     assert "rating_source" not in schema
