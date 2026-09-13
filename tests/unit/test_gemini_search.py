@@ -112,3 +112,24 @@ def test_grounding_sites_prefers_the_title_over_the_redirect_uri():
 def test_grounding_sites_tolerate_missing_metadata():
     assert grounding_sites({"candidates": [{}]}) == []
     assert grounding_sites({}) == []
+
+
+def test_grounding_sites_are_deduplicated():
+    """Gemini cites a site once per passage it used, so the raw chunk count
+    reports passages read rather than places looked — which badly overstates
+    a sweep's breadth if it reaches a log line."""
+    raw = {
+        "candidates": [
+            {
+                "groundingMetadata": {
+                    "groundingChunks": [
+                        {"web": {"uri": "u1", "title": "winstanleysbikes.co.uk"}},
+                        {"web": {"uri": "u2", "title": "winstanleysbikes.co.uk"}},
+                        {"web": {"uri": "u3", "title": "www.winstanleysbikes.co.uk"}},
+                        {"web": {"uri": "u4", "title": "thebikefactory.co.uk"}},
+                    ]
+                }
+            }
+        ]
+    }
+    assert grounding_sites(raw) == ["winstanleysbikes.co.uk", "thebikefactory.co.uk"]

@@ -82,11 +82,18 @@ def grounding_sites(raw: dict[str, Any]) -> list[str]:
     never succeed. Live sweeps scored every winner "uncited url" until this
     was understood.
     """
-    sites = []
+    sites: list[str] = []
     for web in _web_chunks(raw):
         title = str(web.get("title") or "").strip().lower()
-        if title:
-            sites.append(title[4:] if title.startswith("www.") else title)
+        if not title:
+            continue
+        site = title[4:] if title.startswith("www.") else title
+        # De-duplicated: Gemini cites the same site once per passage it drew
+        # on, so the raw chunk count says how many passages it read, not how
+        # many places it looked. Nothing downstream wants the repeats, and
+        # counting them badly overstates the breadth of a sweep.
+        if site not in sites:
+            sites.append(site)
     return sites
 
 

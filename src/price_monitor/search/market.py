@@ -119,10 +119,11 @@ class MarketSearcher:
 
         urls = grounding_urls(searched.raw_response)
         sites = grounding_sites(searched.raw_response)
-        # Logged while the grounding metadata's shape is still being pinned
-        # down: it is the only way to see what a citation actually looked like
-        # on a sweep that has already happened.
-        self.logger.info(f"Grounded on {len(sites)} site(s): {sites[:6]}")
+        # Pages consulted, not retailers found: the list includes the rating
+        # lookups this prompt asks for (trustpilot.com), price-comparison
+        # sites, and the manufacturer's own site. Comparing its length against
+        # `sources` invites exactly the wrong conclusion.
+        self.logger.info(f"Consulted {len(sites)} site(s): {sites}")
 
         try:
             formatted = retrying(
