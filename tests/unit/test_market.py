@@ -12,7 +12,7 @@ from llmbridge.models import PromptResponse
 import price_monitor.search.market as market_module
 import price_monitor.search.searcher as searcher_module
 from price_monitor.app_config import LLMConfig, PriceCtrl
-from price_monitor.models import Item, PriceStatus
+from price_monitor.models import Item, PriceStatus, Rating
 from price_monitor.search.market import MarketSearcher, _declared_count
 
 NOW = datetime(2026, 9, 11, 6, 0, 0)
@@ -66,9 +66,6 @@ def _candidate(**overrides) -> dict:
         "url": "https://argos.co.uk/widget",
         "in_stock": True,
         "vat_included": True,
-        "rating": 4.4,
-        "rating_count": 900,
-        "rating_source": "trustpilot",
     }
     raw.update(overrides)
     return raw
@@ -103,7 +100,17 @@ def test_a_sweep_reports_all_three_detections(logger):
             _candidate(price=110.0, url="https://c.co.uk/w"),
         ],
     )
-    reading = searcher.price_market(ITEM, None, NOW)
+    same_rating = Rating(4.4, 900, "trustpilot")
+    reading = searcher.price_market(
+        ITEM,
+        None,
+        NOW,
+        ratings={
+            "a.co.uk": same_rating,
+            "b.co.uk": same_rating,
+            "c.co.uk": same_rating,
+        },
+    )
     assert reading.status == PriceStatus.OK
     assert reading.item == "Widget"
     assert reading.cheapest.price == 100.0
@@ -120,15 +127,22 @@ def test_the_three_detections_can_name_three_different_retailers(logger):
     searcher = _searcher(
         logger,
         [
-            _candidate(
-                price=80.0, rating=None, rating_count=None, url="https://cheap.co.uk/w"
-            ),
-            _candidate(price=100.0, rating=4.0, url="https://base.co.uk/w"),
-            _candidate(price=102.0, rating=4.5, url="https://mid.co.uk/w"),
-            _candidate(price=300.0, rating=4.9, url="https://posh.co.uk/w"),
+            _candidate(price=80.0, url="https://cheap.co.uk/w"),
+            _candidate(price=100.0, url="https://base.co.uk/w"),
+            _candidate(price=102.0, url="https://mid.co.uk/w"),
+            _candidate(price=300.0, url="https://posh.co.uk/w"),
         ],
     )
-    reading = searcher.price_market(ITEM, None, NOW)
+    reading = searcher.price_market(
+        ITEM,
+        None,
+        NOW,
+        ratings={
+            "base.co.uk": Rating(4.0, 900, "trustpilot"),
+            "mid.co.uk": Rating(4.5, 900, "trustpilot"),
+            "posh.co.uk": Rating(4.9, 900, "trustpilot"),
+        },
+    )
     assert reading.cheapest.site == "cheap.co.uk"
     assert reading.cheapest.rating == ""
     assert reading.best_rated.site == "posh.co.uk"
@@ -138,10 +152,7 @@ def test_the_three_detections_can_name_three_different_retailers(logger):
 
 
 def test_a_sweep_with_no_rated_candidate_has_no_rated_or_value_detection(logger):
-    searcher = _searcher(
-        logger,
-        [_candidate(price=100.0, rating=None, rating_count=None)],
-    )
+    searcher = _searcher(logger, [_candidate(price=100.0)])
     reading = searcher.price_market(ITEM, None, NOW)
     assert reading.cheapest.price == 100.0
     assert reading.best_rated is None
@@ -168,64 +179,23 @@ def test_a_badly_rated_retailer_is_no_longer_dropped(logger):
     searcher = _searcher(
         logger,
         [
-            _candidate(
-                price=50.0, rating=1.4, rating_count=33904, url="https://a.co.uk/w"
-            ),
+            _candidate(price=50.0, url="https://a.co.uk/w"),
             _candidate(price=100.0, url="https://b.co.uk/w"),
         ],
     )
-    reading = searcher.price_market(ITEM, None, NOW)
+    reading = searcher.price_market(
+        ITEM, None, NOW, ratings={"a.co.uk": Rating(1.4, 33904, "trustpilot")}
+    )
     assert reading.cheapest.price == 50.0
     assert reading.cheapest.rating == "1.4 Trustpilot"
     assert reading.sources == 2
-
-
-def test_an_out_of_range_rating_is_treated_as_unrated(logger):
-    """Ratings are out of 5. A model reporting 45.0 (out of 10, or a review
-    count mistaken for a score) is not a trustworthy five-point value, so it
-    is treated as unknown rather than displayed — and stays ineligible for
-    the best-rated and best-value detections, which both require a rating."""
-    searcher = _searcher(
-        logger,
-        [
-            _candidate(
-                price=100.0, rating=45.0, rating_count=900, url="https://a.co.uk/w"
-            ),
-        ],
-    )
-    reading = searcher.price_market(ITEM, None, NOW)
-    assert reading.status == PriceStatus.OK
-    assert reading.cheapest.price == 100.0
-    assert reading.cheapest.rating == ""
-    assert reading.best_rated is None
-    assert reading.best_value is None
-
-
-def test_a_bad_rating_on_too_few_reviews_reads_as_unrated(logger):
-    """2.1 from 12 reviews is noise, not evidence — the candidate survives
-    and competes on price, just without a displayed rating."""
-    searcher = _searcher(
-        logger,
-        [
-            _candidate(
-                price=50.0, rating=2.1, rating_count=12, url="https://a.co.uk/w"
-            ),
-            _candidate(price=100.0, url="https://b.co.uk/w"),
-        ],
-    )
-    reading = searcher.price_market(ITEM, None, NOW)
-    assert reading.cheapest.price == 50.0
 
 
 def test_an_unrated_retailer_still_competes(logger):
     """Dropping unknowns would bias every sweep toward the big chains."""
     searcher = _searcher(
         logger,
-        [
-            _candidate(
-                price=50.0, rating=None, rating_count=None, url="https://a.co.uk/w"
-            ),
-        ],
+        [_candidate(price=50.0, url="https://a.co.uk/w")],
     )
     reading = searcher.price_market(ITEM, None, NOW)
     assert reading.cheapest.price == 50.0
@@ -313,18 +283,6 @@ def test_a_non_dict_entry_in_candidates_is_ignored(logger):
     reading = searcher.price_market(ITEM, None, NOW)
     assert reading.status == PriceStatus.OK
     assert reading.cheapest.price == 100.0
-
-
-def test_a_boolean_rating_is_treated_as_unrated_not_as_one(logger):
-    """True as a rating must not parse as 1.0 and be treated as trustworthy."""
-    searcher = _searcher(
-        logger,
-        [_candidate(price=100.0, rating=True, rating_count=900)],
-    )
-    reading = searcher.price_market(ITEM, None, NOW)
-    assert reading.status == PriceStatus.OK
-    assert reading.cheapest.price == 100.0
-    assert reading.cheapest.rating == ""
 
 
 def test_a_big_move_from_the_last_cheapest_price_is_suspect(logger):
@@ -600,3 +558,45 @@ def test_retention_is_off_when_no_directory_is_configured(logger):
     """Nothing is written, and nothing raises."""
     searcher = _searcher(logger, [_candidate(price=100.0)])
     assert searcher.price_market(ITEM, None, NOW).status == PriceStatus.OK
+
+
+def test_a_candidates_rating_comes_from_the_cache_not_the_reply(logger):
+    """The model no longer reports ratings; a stale-but-stable cached value is
+    better than one that changes source between runs."""
+    searcher = _searcher(logger, [_candidate(price=100.0, url="https://argos.co.uk/w")])
+    reading = searcher.price_market(
+        ITEM, None, NOW, ratings={"argos.co.uk": Rating(4.4, 900, "trustpilot")}
+    )
+    assert reading.cheapest.rating == "4.4 Trustpilot"
+
+
+def test_an_uncached_retailer_is_unrated_but_still_competes(logger):
+    searcher = _searcher(logger, [_candidate(price=100.0, url="https://new.co.uk/w")])
+    reading = searcher.price_market(ITEM, None, NOW, ratings={})
+    assert reading.cheapest.price == 100.0
+    assert reading.cheapest.rating == ""
+    assert reading.best_rated is None
+
+
+def test_a_cached_rating_on_too_few_reviews_is_still_untrusted(logger):
+    """MIN_RATING_COUNT governs whether a rating is trusted, which is a
+    separate question from whether it is known."""
+    searcher = _searcher(logger, [_candidate(price=100.0, url="https://argos.co.uk/w")])
+    reading = searcher.price_market(
+        ITEM, None, NOW, ratings={"argos.co.uk": Rating(4.9, 12, "trustpilot")}
+    )
+    assert reading.cheapest.rating == ""
+
+
+def test_the_sweep_reports_the_sites_it_kept(logger):
+    """Only winners reach the history, so the losers must be registered from
+    here or they could never be rated."""
+    searcher = _searcher(
+        logger,
+        [
+            _candidate(price=100.0, url="https://argos.co.uk/w"),
+            _candidate(price=120.0, url="https://currys.co.uk/w"),
+        ],
+    )
+    searcher.price_market(ITEM, None, NOW)
+    assert searcher.seen_sites == {"argos.co.uk", "currys.co.uk"}

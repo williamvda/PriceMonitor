@@ -4,8 +4,12 @@ Asks a search-grounded model what an item costs across UK retailers generally,
 then reports three answers from the candidates that survive validation — the
 best-rated retailer, the cheapest, and the best compromise between them — with
 a confidence score describing how much the sweep supports them. Two calls,
-because grounding and structured output are unreliable together. Nothing raises
-out of :meth:`price_market`.
+because grounding and structured output are unreliable together. Candidate
+ratings come from the caller's rating cache rather than the model, so grounding
+passages go toward finding shops rather than reading Trustpilot;
+:attr:`MarketSearcher.seen_sites` then reports the domains the sweep just kept,
+for the caller to register for later rating. Nothing raises out of
+:meth:`price_market`.
 """
 
 import logging
@@ -23,6 +27,7 @@ from price_monitor.models import (
     Item,
     PriceReading,
     PriceStatus,
+    Rating,
     supplier_domain,
 )
 from price_monitor.search.confidence import Candidate, same_site, score
@@ -36,12 +41,6 @@ from price_monitor.search.json_extract import extract_json
 from price_monitor.search.prompts import market_format_prompt, market_prompt
 from price_monitor.search.searcher import FORMAT_PROVIDER, retrying
 from price_monitor.search.validation import normalise_price
-
-# Ratings are reported out of 5. A value outside [0, MAX_RATING] is not a
-# trustworthy score — e.g. the model reported one out of 10 — so it is
-# treated as unknown rather than trusted.
-MAX_RATING = 5.0
-
 
 # The search call is asked to sign off with "END: <n> retailers". Its absence
 # says nothing on its own — a model that forgets the line must not cost a
@@ -71,6 +70,7 @@ class MarketSearcher:
         self.logger = get_child_logger(logger, __class__.__name__)
         self._ctrl = ctrl
         self._report_dir = report_dir
+        self.seen_sites: set[str] = set()
         search_provider = config.provider if config.grounded else FORMAT_PROVIDER
         if not config.grounded:
             self.logger.warning(
@@ -101,12 +101,16 @@ class MarketSearcher:
         last_price: float | None,
         timestamp: datetime,
         blocked: set[str] | None = None,
+        ratings: dict[str, Rating] | None = None,
     ) -> PriceReading:
         """Sweep UK retailers for ``item``, never raising on failure.
 
         ``blocked`` names retailers the user never wants reported. They are
         dropped before ranking and do not count toward ``sources`` — a shop
         you would not buy from is not corroboration.
+
+        ``ratings`` supplies each candidate's rating from the cache, keyed by
+        domain: the sweep prompt no longer asks the model for one.
         """
         try:
             searched = retrying(
@@ -137,10 +141,10 @@ class MarketSearcher:
 
         urls = grounding_urls(searched.raw_response)
         sites = grounding_sites(searched.raw_response)
-        # Pages consulted, not retailers found: the list includes the rating
-        # lookups this prompt asks for (trustpilot.com), price-comparison
-        # sites, and the manufacturer's own site. Comparing its length against
-        # `sources` invites exactly the wrong conclusion.
+        # Pages consulted, not retailers found: the list includes
+        # price-comparison sites and the manufacturer's own site alongside
+        # actual retailers. Comparing its length against `sources` invites
+        # exactly the wrong conclusion.
         self.logger.info(f"Consulted {len(sites)} site(s): {sites}")
 
         try:
@@ -171,6 +175,7 @@ class MarketSearcher:
             truncated,
             _declared_count(searched.text),
             blocked or set(),
+            ratings,
         )
         self._keep_report(item, reading, searched.text, formatted.text)
         return reading
@@ -225,8 +230,9 @@ class MarketSearcher:
         truncated: bool = False,
         declared: int | None = None,
         blocked: set[str] | None = None,
+        ratings: dict[str, Rating] | None = None,
     ) -> PriceReading:
-        pairs = self._candidates(payload, blocked or set())
+        pairs = self._candidates(payload, blocked or set(), ratings)
         if not pairs:
             note = str(payload.get("note") or "").strip() or "no usable candidates"
             return self._failed(item, timestamp, PriceStatus.NOT_FOUND, note)
@@ -308,7 +314,10 @@ class MarketSearcher:
         return f"converted {kept} of {declared} retailers reported"
 
     def _candidates(
-        self, payload: dict, blocked: set[str]
+        self,
+        payload: dict,
+        blocked: set[str],
+        ratings: dict[str, Rating] | None,
     ) -> list[tuple[Candidate, str]]:
         """Validated, in-stock candidates, VAT-normalised.
 
@@ -317,6 +326,7 @@ class MarketSearcher:
         no adjustment), so the winner's note can be preserved without
         carrying VAT fields on :class:`Candidate` itself.
         """
+        self.seen_sites = set()
         candidates: list[tuple[Candidate, str]] = []
         raw_candidates = payload.get("candidates")
         if not isinstance(raw_candidates, list):
@@ -336,22 +346,16 @@ class MarketSearcher:
                 self.logger.info(f"Skipping blocked retailer {site}")
                 continue
 
-            rating = _as_float(raw.get("rating"))
-            if rating is not None and not (0.0 <= rating <= MAX_RATING):
-                # Ratings are out of 5. A value outside that range (a rating
-                # out of 10, or a review count mistaken for a score) is not a
-                # trustworthy 5-point score, so it is treated as unknown
-                # rather than displayed as one.
-                rating = None
-            count = _as_int(raw.get("rating_count"))
+            cached = (ratings or {}).get(site, Rating())
+            self.seen_sites.add(site)
             candidate = Candidate(
                 supplier=str(raw.get("supplier") or "").strip(),
                 price=price,
                 url=str(raw.get("url") or "").strip(),
                 in_stock=True,
-                rating=rating,
-                rating_count=count,
-                rating_source=str(raw.get("rating_source") or "").strip(),
+                rating=cached.rating,
+                rating_count=cached.reviews,
+                rating_source=cached.source,
             )
             candidates.append((candidate, vat_note))
         return candidates
@@ -366,21 +370,3 @@ class MarketSearcher:
             status=status,
             note=note,
         )
-
-
-def _as_float(value: object) -> float | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _as_int(value: object) -> int | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
