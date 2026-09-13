@@ -15,6 +15,7 @@ from py_utils.logger import get_child_logger
 
 from price_monitor.app_config import LLMConfig
 from price_monitor.models import Rating, supplier_domain
+from price_monitor.search.confidence import same_site
 from price_monitor.search.json_extract import extract_json
 from price_monitor.search.searcher import FORMAT_PROVIDER, retrying
 
@@ -102,7 +103,9 @@ class RatingsLookup:
 
         A site the report does not mention still comes back, with an empty
         rating, so its ``checked`` date is stamped and it is not looked up
-        again tomorrow.
+        again tomorrow. ``sites`` is sent as one prompt, whatever its length —
+        capping it at :const:`RATING_BATCH` per call is the caller's job, not
+        this method's.
         """
         wanted = [site for site in sites if site.strip()]
         if not wanted:
@@ -116,6 +119,11 @@ class RatingsLookup:
                 "ratings search",
                 self.logger,
             )
+        except (LLMError, KeyError, IndexError, TypeError) as exc:
+            self.logger.warning(f"Ratings search failed: {exc}")
+            return {}
+
+        try:
             formatted = retrying(
                 lambda: self._format_client.prompt(
                     _FORMAT_TEMPLATE.format(report=searched.text)
@@ -123,34 +131,71 @@ class RatingsLookup:
                 "ratings format",
                 self.logger,
             )
+        except (LLMError, KeyError, IndexError, TypeError) as exc:
+            self.logger.warning(f"Ratings format failed: {exc}")
+            return {}
+
+        try:
             payload = extract_json(formatted.text)
-        except (LLMError, KeyError, IndexError, TypeError, ValueError) as exc:
-            self.logger.warning(f"Ratings lookup failed: {exc}")
+        except ValueError as exc:
+            self.logger.warning(f"Unparseable ratings reply: {exc}")
             return {}
 
         found = self._parse(payload)
-        return {site: found.get(site, Rating()) for site in wanted}
+        return {
+            site: next((r for cited, r in found if same_site(site, cited)), Rating())
+            for site in wanted
+        }
 
-    def _parse(self, payload: dict) -> dict[str, Rating]:
+    def _parse(self, payload: dict) -> list[tuple[str, Rating]]:
+        """Parse the reply into ``(cited site, Rating)`` pairs.
+
+        Kept as a list rather than a dict keyed by site: the model's own
+        normalisation is not trustworthy enough to dedupe on, and matching
+        against what was actually requested happens in :meth:`fetch`, via
+        :func:`same_site`.
+        """
         entries = payload.get("ratings")
         if not isinstance(entries, list):
-            return {}
-        parsed: dict[str, Rating] = {}
+            return []
+        parsed: list[tuple[str, Rating]] = []
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            site = supplier_domain(f"https://{str(entry.get('site') or '').strip()}")
+            site = _normalise_site(entry.get("site"))
             if not site:
                 continue
             rating = _as_float(entry.get("rating"))
             if rating is not None and not (0.0 <= rating <= _MAX_RATING):
                 rating = None
-            parsed[site] = Rating(
-                rating=rating,
-                reviews=_as_int(entry.get("reviews")),
-                source=str(entry.get("source") or "").strip().lower(),
+            parsed.append(
+                (
+                    site,
+                    Rating(
+                        rating=rating,
+                        reviews=_as_int(entry.get("reviews")),
+                        source=str(entry.get("source") or "").strip().lower(),
+                    ),
+                )
             )
         return parsed
+
+
+def _normalise_site(value: object) -> str:
+    """The bare domain a reported ``site`` refers to.
+
+    The format call is asked for a bare domain but is fed an unstructured
+    prose report that may itself contain full URLs, so a scheme is prefixed
+    only when one is not already there — blindly prepending ``https://`` onto
+    ``https://argos.co.uk/x`` collapses it to ``https:``, discarding a rating
+    that was actually found.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if not raw.lower().startswith(("http://", "https://")):
+        raw = f"https://{raw}"
+    return supplier_domain(raw)
 
 
 def _as_float(value: object) -> float | None:

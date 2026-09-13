@@ -160,6 +160,35 @@ def test_matching_ignores_www_and_case(logger):
     assert lookup.fetch(["argos.co.uk"])["argos.co.uk"].rating == 4.1
 
 
+def test_a_url_shaped_site_matches_the_bare_domain_requested(logger):
+    """The source report is unstructured prose that may contain links, and the
+    format call can carry one straight through instead of a bare domain."""
+    lookup = _lookup(
+        logger,
+        _payload(
+            [
+                {
+                    "site": "https://argos.co.uk/some-product",
+                    "rating": 4.1,
+                    "reviews": 900,
+                    "source": "trustpilot",
+                }
+            ]
+        ),
+    )
+    assert lookup.fetch(["argos.co.uk"])["argos.co.uk"].rating == 4.1
+
+
+def test_a_bare_brand_name_matches_the_full_domain_requested(logger):
+    lookup = _lookup(
+        logger,
+        _payload(
+            [{"site": "Argos", "rating": 4.1, "reviews": 900, "source": "trustpilot"}]
+        ),
+    )
+    assert lookup.fetch(["argos.co.uk"])["argos.co.uk"].rating == 4.1
+
+
 def test_an_unparseable_reply_answers_every_site_with_nothing(logger):
     lookup = _lookup(logger, "not json at all")
     ratings = lookup.fetch(["argos.co.uk"])
