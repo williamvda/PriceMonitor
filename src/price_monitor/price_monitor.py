@@ -295,17 +295,23 @@ class PriceMonitor:
             else {}
         )
         readings: list[PriceReading] = []
+        # Accumulated across every item: MarketSearcher.seen_sites resets on
+        # each price_market() call (by design, so a failed sweep can't leak a
+        # previous item's sites), so it must be collected right after each
+        # sweep rather than read once after the loop — reading it once would
+        # silently keep only the last item's retailers.
+        seen: set[str] = set()
         for index, item in enumerate(items):
             if index and self.ctrl.request_delay_s:
                 self.stop_event.wait(self.ctrl.request_delay_s)
             last = last_prices.get(item.name)
-            reading = self._sweep_one(item, last, blocked, ratings)
+            reading = self._sweep_one(item, last, blocked, ratings, seen)
             readings.append(
                 self._resweep_if_thin(
-                    reading, item, last, blocked, source_high, ratings
+                    reading, item, last, blocked, source_high, ratings, seen
                 )
             )
-        self._register_seen()
+        self._register_seen(seen)
         return readings
 
     def _read_ratings(self) -> dict[str, Rating]:
@@ -320,15 +326,17 @@ class PriceMonitor:
             self.logger.warning(f"Could not read cached ratings: {exc}")
             return {}
 
-    def _register_seen(self) -> None:
+    def _register_seen(self, seen: set[str]) -> None:
         """Add retailers this run's sweeps saw to the ratings cache.
 
         Only the three winning detections reach the history, so a retailer
         that competed and lost would otherwise never be known about — and
-        could never become best-rated. Called unconditionally, even with an
-        empty set: RatingsTab.register() is already a no-op on one.
+        could never become best-rated. Skipped on an empty set: register()
+        reads the sheet to check for unseen sites, and a run that found
+        nothing new should not spend that read.
         """
-        seen = getattr(self._searcher, "seen_sites", set())
+        if not seen:
+            return
         try:
             self.ratings_tab.register(seen)
         except Exception as exc:
@@ -342,6 +350,7 @@ class PriceMonitor:
         blocked: set[str],
         source_high: dict[str, int],
         ratings: dict[str, Rating],
+        seen: set[str],
     ) -> PriceReading:
         """Sweep once more when a result is thin for this item, and keep the better.
 
@@ -360,7 +369,7 @@ class PriceMonitor:
         )
         if self.ctrl.request_delay_s:
             self.stop_event.wait(self.ctrl.request_delay_s)
-        retry = self._sweep_one(item, last_price, blocked, ratings)
+        retry = self._sweep_one(item, last_price, blocked, ratings, seen)
         if (retry.sources or 0) <= reading.sources:
             return reading
         note = f"{retry.note}; retried after a thin sweep found {reading.sources}"
@@ -372,22 +381,28 @@ class PriceMonitor:
         last_price: float | None,
         blocked: set[str],
         ratings: dict[str, Rating],
+        seen: set[str],
     ) -> PriceReading:
         timestamp = datetime.now().replace(microsecond=0)
         try:
-            return self._searcher.price_market(
+            reading = self._searcher.price_market(
                 item, last_price, timestamp, blocked, ratings
             )
         except Exception as exc:
             # One failed sweep must never abort the rest of the run.
             self.logger.warning(f"Sweep for '{item.name}' failed: {exc}")
-            return PriceReading(
+            reading = PriceReading(
                 timestamp=timestamp,
                 item=item.name,
                 currency=self.ctrl.currency,
                 status=PriceStatus.ERROR,
                 note=str(exc),
             )
+        # Read immediately: the next call to price_market (the next item, or
+        # this item's own resweep retry) resets it before this caller gets
+        # another chance to look.
+        seen |= getattr(self._searcher, "seen_sites", set())
+        return reading
 
     def run(self) -> None:
         """Timer loop: a slow full refresh, a faster poll for new items."""

@@ -787,6 +787,9 @@ def test_stale_ratings_are_refreshed_before_the_sweeps(logger):
         [_history_row("Widget", datetime.now() - _STALE)], ["Widget"]
     )
     searcher = FakeMarketSearcher()
+    # Registration is skipped on an empty set (it costs a Sheets read for
+    # nothing), so this needs a real site for "register" to actually fire.
+    searcher.seen_sites = {"argos.co.uk"}
     monitor = _monitor(sheet, searcher, logger)
     monitor.ratings_tab = _FakeRatingsTab(stale=["argos.co.uk"], on_call=order.append)
     monitor.ratings_lookup = _FakeLookup(on_call=order.append)
@@ -844,3 +847,24 @@ def test_a_ratings_failure_does_not_stop_the_sweep(logger):
     )
     monitor.update()
     assert searcher.calls == ["Widget"]
+
+
+def test_every_items_seen_sites_are_registered_not_just_the_last(logger):
+    """seen_sites resets on every sweep, so registering once after the loop
+    must accumulate across items, not just read the last item's leftovers."""
+
+    class PerItemSearcher(FakeMarketSearcher):
+        def price_market(self, item, last_price, timestamp, blocked=None, ratings=None):
+            reading = super().price_market(
+                item, last_price, timestamp, blocked, ratings
+            )
+            self.seen_sites = {f"{item.name.lower()}-shop.co.uk"}
+            return reading
+
+    sheet = FakeSheet({"Items": _items(["Widget", "Gadget"])})
+    searcher = PerItemSearcher()
+    monitor = _monitor(sheet, searcher, logger)
+    tab = _FakeRatingsTab()
+    monitor.ratings_tab = tab
+    monitor.update()
+    assert tab.registered == {"widget-shop.co.uk", "gadget-shop.co.uk"}
