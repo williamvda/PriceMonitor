@@ -326,8 +326,10 @@ the best-rated or best-value detection until a later refresh has rated it.
 
 ## The sheet
 
-PriceMonitor expects a Google Sheet with two tabs, named by `items_sheet`
-and `history_sheet` in `price_ctrl` (`Items` and `Prices` by default).
+PriceMonitor expects a Google Sheet with four tabs: `Items` and `Prices`
+(named by `items_sheet` and `history_sheet` in `price_ctrl`), plus `Control`
+and `Ratings` (see [The Control tab](#the-control-tab) and
+[The Ratings tab](#the-ratings-tab)).
 
 ### Items tab
 
@@ -342,10 +344,10 @@ Column A (`item`) is yours; every column after it is rewritten on every run.
 | `cheapest_price` | tool | The cheapest detection's price. |
 | `cheapest_site` | tool | Its retailer's domain. |
 | `cheapest_rating` | tool | Its rating; blank when that retailer is unrated. |
-| `cheapest_seen` | tool | The date that best price was seen. |
 | `value_price` | tool | The best-value detection's price. See [The best-value rule](#the-best-value-rule) — this can exceed `cheapest_price`. |
 | `value_site` | tool | Its retailer's domain. |
 | `value_rating` | tool | Its rating. |
+| `cheapest_seen` | tool | The date that best price was seen. |
 | `min` | tool | Lowest `cheapest_price` ever recorded. |
 | `mean` | tool | Mean of all recorded `cheapest_price` values. |
 | `confidence` | tool | The latest sweep's confidence score, `0`–`1`. See [What confidence means](#what-confidence-means). |

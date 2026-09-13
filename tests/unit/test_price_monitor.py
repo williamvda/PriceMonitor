@@ -849,6 +849,39 @@ def test_a_ratings_failure_does_not_stop_the_sweep(logger):
     assert searcher.calls == ["Widget"]
 
 
+def test_a_failed_items_sites_do_not_clobber_a_prior_items_registration(logger):
+    """test_market.py proves seen_sites resets to empty on a failed sweep;
+    test_every_items_seen_sites_are_registered_not_just_the_last proves sites
+    accumulate across successful items. Neither covers the intersection: a
+    run where item 1 succeeds and item 2 fails must still register item 1's
+    retailers, and nothing from item 2."""
+
+    class PerItemSearcher(FakeMarketSearcher):
+        def price_market(self, item, last_price, timestamp, blocked=None, ratings=None):
+            if item.name == "Widget":
+                self.seen_sites = {"argos.co.uk"}
+                return super().price_market(
+                    item, last_price, timestamp, blocked, ratings
+                )
+            # Mirrors MarketSearcher's real behaviour: a failed sweep resets
+            # seen_sites to empty before this caller ever sees it.
+            self.seen_sites = set()
+            return PriceReading(
+                timestamp=timestamp,
+                item=item.name,
+                currency="GBP",
+                status=PriceStatus.PARSE_ERROR,
+            )
+
+    sheet = FakeSheet({"Items": _items(["Widget", "Gadget"])})
+    searcher = PerItemSearcher()
+    monitor = _monitor(sheet, searcher, logger)
+    tab = _FakeRatingsTab()
+    monitor.ratings_tab = tab
+    monitor.update()
+    assert tab.registered == {"argos.co.uk"}
+
+
 def test_every_items_seen_sites_are_registered_not_just_the_last(logger):
     """seen_sites resets on every sweep, so registering once after the loop
     must accumulate across items, not just read the last item's leftovers."""
