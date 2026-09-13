@@ -135,6 +135,31 @@ def test_an_unparseable_date_counts_as_never_checked(logger):
     assert RatingsTab(FakeSheet(frame), "Ratings", logger).stale(30) == ["argos.co.uk"]
 
 
+def test_a_future_checked_date_counts_as_never_checked(logger):
+    """A date we could not have written is a hand-edit error, and the safe
+    direction for an error is always 'look it up again', never 'never look
+    again' — otherwise a typo'd year freezes that retailer's rating for
+    decades."""
+    future = (datetime.now() + timedelta(days=5 * 365)).strftime("%Y-%m-%d")
+    frame = _rows([_row("argos.co.uk", checked=future)])
+    assert RatingsTab(FakeSheet(frame), "Ratings", logger).stale(30) == ["argos.co.uk"]
+
+
+def test_a_future_checked_date_is_grouped_with_never_checked_sites(logger):
+    old = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+    future = (datetime.now() + timedelta(days=5 * 365)).strftime("%Y-%m-%d")
+    frame = _rows(
+        [
+            _row("old.co.uk", checked=old),
+            _row("future.co.uk", checked=future),
+        ]
+    )
+    assert RatingsTab(FakeSheet(frame), "Ratings", logger).stale(30) == [
+        "future.co.uk",
+        "old.co.uk",
+    ]
+
+
 def test_never_checked_sites_come_before_merely_stale_ones(logger):
     """A retailer we have never rated is worth more than refreshing one we
     already have a usable number for."""
@@ -189,6 +214,15 @@ def test_store_stamps_checked_even_for_a_site_with_no_rating(logger):
     row = sheet.frame.iloc[0]
     assert row["checked"] == TODAY
     assert row["rating"] == ""
+
+
+def test_a_comma_formatted_review_count_is_not_lost(logger):
+    """Review counts gate MIN_RATING_COUNT, so a real count silently going
+    blank can flip a rating from trusted to untrusted."""
+    frame = _rows([_row("argos.co.uk", rating="4.1")])
+    frame.loc[0, "reviews"] = "1,200"
+    ratings = RatingsTab(FakeSheet(frame), "Ratings", logger).read()
+    assert ratings["argos.co.uk"].reviews == 1200
 
 
 def test_store_updates_an_existing_row_rather_than_duplicating_it(logger):

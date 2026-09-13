@@ -71,14 +71,23 @@ class RatingsTab:
             if not site:
                 continue
             checked = _as_date(row["checked"])
-            if checked is None:
+            # A future date cannot have been written honestly — it is a
+            # hand-edit error, and the safe direction for an error is always
+            # "look it up again", never "frozen until real time catches up".
+            if checked is None or checked > datetime.now():
                 never.append(site)
             elif checked < cutoff:
                 old.append(site)
         return never + old
 
     def register(self, sites: set[str]) -> None:
-        """Add placeholder rows for sites the cache has not seen."""
+        """Add placeholder rows for sites the cache has not seen.
+
+        Only the three winning detections reach the price history, so a
+        retailer that competed and lost is written down nowhere else. Without
+        this, nothing would ever know to fetch its rating, and it could never
+        become one of the winners.
+        """
         frame = self._frame()
         if frame is None:
             return
@@ -162,7 +171,7 @@ def _as_float(value: object) -> float | None:
 
 def _as_int(value: object) -> int | None:
     try:
-        return int(float(str(value).strip()))
+        return int(float(str(value).strip().replace(",", "")))
     except (TypeError, ValueError):
         return None
 
