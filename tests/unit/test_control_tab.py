@@ -103,6 +103,22 @@ def test_a_missing_tab_is_not_announced(logger):
     assert sent == []
 
 
+def test_a_missing_tab_is_recognised_case_insensitively(logger):
+    """The API's own capitalisation of the message is not a contract."""
+    sheet = FakeSheet(error=RuntimeError("UNABLE TO PARSE RANGE: Control"))
+    assert ControlTab(sheet, "Control", logger).blocked() == set()
+    assert sheet.writes == ["Control"]
+
+
+def test_a_transient_error_does_not_create_or_write_the_tab(logger):
+    """A 503 or a timeout looks nothing like 'tab does not exist' and must be
+    treated exactly like the unreadable case: no create, no write, no
+    ratings/controls used this run."""
+    sheet = FakeSheet(error=RuntimeError("503 Service Unavailable"))
+    assert ControlTab(sheet, "Control", logger).blocked() == set()
+    assert sheet.writes == []
+
+
 def test_a_failure_to_create_the_tab_does_not_stop_the_run(logger):
     """A sheet problem must never cost a sweep."""
 

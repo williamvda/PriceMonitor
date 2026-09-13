@@ -106,11 +106,58 @@ def test_an_unreadable_tab_returns_none_and_is_never_written(logger):
     assert sheet.writes == []
 
 
+def test_an_unreadable_tab_notifies_only_once_per_run(logger):
+    """update() calls _frame() up to three times (stale, read, register); a
+    tab that stays broken for all three must still page once, not thrice."""
+    sent: list[str] = []
+    sheet = FakeSheet(error=RuntimeError("503 Service Unavailable"))
+    tab = RatingsTab(sheet, "Ratings", logger, notify=sent.append)
+    tab.stale(30)
+    tab.read()
+    tab.register({"argos.co.uk"})
+    assert len(sent) == 1
+
+
+def test_a_recovered_tab_can_notify_again_on_a_later_failure(logger):
+    """The suppression flag must not be a lifetime ban: a tab that comes back
+    healthy and later breaks again is a new problem worth a new alert."""
+    sent: list[str] = []
+    sheet = FakeSheet(error=RuntimeError("503 Service Unavailable"))
+    tab = RatingsTab(sheet, "Ratings", logger, notify=sent.append)
+    tab.read()
+    assert len(sent) == 1
+
+    sheet.error = None
+    tab.read()
+
+    sheet.error = RuntimeError("503 again")
+    tab.read()
+    assert len(sent) == 2
+
+
 def test_a_missing_tab_is_created_empty(logger):
     sheet = FakeSheet(error=RuntimeError("Unable to parse range: Ratings"))
     assert RatingsTab(sheet, "Ratings", logger).read() == {}
     assert sheet.writes == ["Ratings"]
     assert list(sheet.frame.columns) == COLUMNS
+
+
+def test_a_missing_tab_is_recognised_case_insensitively(logger):
+    sheet = FakeSheet(error=RuntimeError("UNABLE TO PARSE RANGE: Ratings"))
+    assert RatingsTab(sheet, "Ratings", logger).read() == {}
+    assert sheet.writes == ["Ratings"]
+
+
+def test_a_transient_error_does_not_create_or_write_the_tab(logger):
+    """A 503 or a timeout must be treated exactly like the unreadable case:
+    no create, no write, no cached ratings used this run — never the
+    'tab does not exist' path, which would wipe the whole cache."""
+    sheet = FakeSheet(error=RuntimeError("503 Service Unavailable"))
+    tab = RatingsTab(sheet, "Ratings", logger)
+    assert tab.read() is None
+    tab.register({"argos.co.uk"})
+    tab.store({"argos.co.uk": Rating(4.1, 900, "trustpilot")})
+    assert sheet.writes == []
 
 
 def test_stale_includes_sites_never_checked(logger):
@@ -242,3 +289,18 @@ def test_store_updates_an_existing_row_rather_than_duplicating_it(logger):
     )
     assert len(sheet.frame) == 1
     assert sheet.frame.iloc[0]["rating"] == "4.4"
+
+
+def test_a_hand_typed_mixed_case_site_is_found_by_a_lowercase_lookup(logger):
+    """The README invites hand-typing a site to merge the model's three
+    spellings of one retailer into one row; that row must actually match the
+    lowercase domain every producer emits, or it is inert."""
+    sheet = FakeSheet(_rows([_row("Argos.co.uk")]))
+    tab = RatingsTab(sheet, "Ratings", logger)
+    ratings = tab.read()
+    assert "argos.co.uk" in ratings
+    assert "Argos.co.uk" not in ratings
+    assert tab.stale(30) == []
+
+    tab.register({"argos.co.uk"})
+    assert sheet.writes == [], "must not append a second, lowercase row"

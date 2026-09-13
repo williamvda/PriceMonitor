@@ -14,7 +14,7 @@ import pandas as pd
 from py_utils.logger import get_child_logger
 
 from price_monitor.models import Rating
-from price_monitor.sheets.protocol import SheetInterface
+from price_monitor.sheets.protocol import SheetInterface, is_missing_tab_error
 
 DATE_FORMAT = "%Y-%m-%d"
 
@@ -46,6 +46,11 @@ class RatingsTab:
         self._gsheet = gsheet
         self._sheet_name = sheet_name
         self._notify = notify or (lambda _message: None)
+        # update() calls _frame() up to three times (stale, read, register);
+        # this suppresses the second and third alert for the same failure
+        # within a run. Reset on the next successful read, so a tab that
+        # recovers and later breaks again still gets a fresh alert.
+        self._unreadable_notified = False
 
     def read(self) -> dict[str, Rating] | None:
         """Cached ratings by site, or ``None`` when the tab could not be read."""
@@ -59,7 +64,7 @@ class RatingsTab:
                 source=str(row["source"] or "").strip(),
             )
             for row in frame.to_dict("records")
-            if (site := str(row["site"] or "").strip())
+            if (site := str(row["site"] or "").strip().lower())
         }
 
     def stale(self, within_days: float) -> list[str]:
@@ -74,7 +79,7 @@ class RatingsTab:
         cutoff = datetime.now() - timedelta(days=within_days)
         never, old = [], []
         for row in frame.to_dict("records"):
-            site = str(row["site"] or "").strip()
+            site = str(row["site"] or "").strip().lower()
             if not site:
                 continue
             checked = _as_date(row["checked"])
@@ -98,8 +103,8 @@ class RatingsTab:
         frame = self._frame()
         if frame is None:
             return
-        known = {str(site).strip() for site in frame["site"]}
-        unseen = sorted({s.strip() for s in sites if s.strip()} - known)
+        known = {str(site).strip().lower() for site in frame["site"]}
+        unseen = sorted({s.strip().lower() for s in sites if s.strip()} - known)
         if not unseen:
             return
         additions = pd.DataFrame(
@@ -120,8 +125,12 @@ class RatingsTab:
         if frame is None or not results:
             return
         today = datetime.now().strftime(DATE_FORMAT)
-        rows = {str(row["site"]).strip(): dict(row) for row in frame.to_dict("records")}
-        for site, rating in results.items():
+        rows = {
+            str(row["site"]).strip().lower(): dict(row)
+            for row in frame.to_dict("records")
+        }
+        for raw_site, rating in results.items():
+            site = str(raw_site).strip().lower()
             rows[site] = {
                 "site": site,
                 "rating": "" if rating.rating is None else f"{rating.rating:g}",
@@ -134,27 +143,34 @@ class RatingsTab:
     def _frame(self) -> pd.DataFrame | None:
         """The tab's contents, or ``None`` when it could not be read.
 
-        A tab that does not exist fails in the Sheets API, which cannot parse
-        the range — that is a first run, and creating it is safe. A tab whose
-        every row is short of its header fails in pandas, locally, which means
-        it exists and still holds data. ``write()`` clears before it writes, so
-        that one must never be written to.
+        A missing tab is told apart from every other failure by the Sheets
+        API's message, not by exception type (see :func:`is_missing_tab_error`)
+        — that is a first run, and creating it is safe. Anything else — a
+        5xx, a timeout, an auth failure, or a tab whose every row is short of
+        its header (which fails in pandas, locally) — means the tab exists
+        and still holds data, so it must never be written: ``write()`` clears
+        before it writes. ``update()`` calls this up to three times per run,
+        so the alert for that case is deduplicated via
+        ``self._unreadable_notified`` rather than sent on every call.
         """
         try:
             frame = self._gsheet.read(sheet_name=self._sheet_name)
-        except ValueError as exc:
-            message = (
-                f"The '{self._sheet_name}' tab could not be read ({exc}), so no "
-                f"cached ratings are being used and none will be written."
-            )
-            self.logger.warning(message)
-            self._notify(f"⚠️ PriceMonitor — {message}")
-            return None
         except Exception as exc:
-            self.logger.info(f"No '{self._sheet_name}' tab ({exc}); creating it.")
-            self._write(pd.DataFrame(columns=COLUMNS))
-            return pd.DataFrame(columns=COLUMNS)
+            if is_missing_tab_error(exc):
+                self.logger.info(f"No '{self._sheet_name}' tab ({exc}); creating it.")
+                self._write(pd.DataFrame(columns=COLUMNS))
+                return pd.DataFrame(columns=COLUMNS)
+            if not self._unreadable_notified:
+                message = (
+                    f"The '{self._sheet_name}' tab could not be read ({exc}), so "
+                    f"no cached ratings are being used and none will be written."
+                )
+                self.logger.warning(message)
+                self._notify(f"⚠️ PriceMonitor — {message}")
+                self._unreadable_notified = True
+            return None
 
+        self._unreadable_notified = False
         if frame.empty:
             return pd.DataFrame(columns=COLUMNS)
         for column in COLUMNS:

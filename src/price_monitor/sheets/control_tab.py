@@ -12,7 +12,7 @@ from typing import Callable
 import pandas as pd
 from py_utils.logger import get_child_logger
 
-from price_monitor.sheets.protocol import SheetInterface
+from price_monitor.sheets.protocol import SheetInterface, is_missing_tab_error
 
 COLUMNS = ["blocked"]
 
@@ -46,16 +46,22 @@ class ControlTab:
     def _read(self) -> pd.DataFrame | None:
         """The tab's contents, or ``None`` when it could not be read.
 
-        The two failures are told apart by who raises. A tab that does not
-        exist fails in the Sheets API, which cannot parse the range — that is
-        the first run, and creating the tab makes the feature discoverable. A
-        tab whose every row is short of its header fails in pandas, locally,
-        which means the tab exists and still holds the user's data. Writing
-        then would clear it, because ``write()`` clears before it writes.
+        The two failures are told apart by the Sheets API's message, not by
+        exception type: a missing tab is reported as a failure to parse the
+        address range (see :func:`is_missing_tab_error`) — that is the first
+        run, and creating the tab makes the feature discoverable. Anything
+        else — a 5xx, a timeout, an auth failure, or a tab whose every row is
+        short of its header (which fails in pandas, locally) — means the tab
+        exists and still holds the user's data, so it must not be written:
+        ``write()`` clears before it writes.
         """
         try:
             return self._gsheet.read(sheet_name=self._sheet_name)
-        except ValueError as exc:
+        except Exception as exc:
+            if is_missing_tab_error(exc):
+                self.logger.info(f"No '{self._sheet_name}' tab ({exc}); creating it.")
+                self._create()
+                return None
             message = (
                 f"The '{self._sheet_name}' tab could not be read ({exc}), so no "
                 f"controls are being applied. Every row is probably short of "
@@ -63,10 +69,6 @@ class ControlTab:
             )
             self.logger.warning(message)
             self._notify(f"⚠️ PriceMonitor — {message}")
-            return None
-        except Exception as exc:
-            self.logger.info(f"No '{self._sheet_name}' tab ({exc}); creating it.")
-            self._create()
             return None
 
     def _create(self) -> None:
