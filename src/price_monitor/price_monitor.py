@@ -24,7 +24,7 @@ from py_utils.logger import consoleLogger, get_child_logger
 
 from price_monitor import __version__
 from price_monitor.app_config import PriceCtrl, load_price_config
-from price_monitor.models import Item, PriceReading, PriceStats, PriceStatus
+from price_monitor.models import Item, PriceReading, PriceStats, PriceStatus, Rating
 from price_monitor.msgserver_client.msg_forwarder import (
     MsgNotifier,
     attach_msg_server,
@@ -36,10 +36,12 @@ from price_monitor.msgserver_client.msg_forwarder import (
     format_startup_message,
 )
 from price_monitor.search.market import MarketSearcher
+from price_monitor.search.ratings import RATING_BATCH, RatingsLookup
 from price_monitor.sheets.control_tab import ControlTab
 from price_monitor.sheets.history_tab import HistoryTab
 from price_monitor.sheets.items_tab import ItemsTab
 from price_monitor.sheets.protocol import MonitoredSheetInterface
+from price_monitor.sheets.ratings_tab import RatingsTab
 
 # Wake at least this often so stop() is honoured promptly even when the next
 # scheduled event is hours away.
@@ -74,6 +76,7 @@ class PriceMonitor:
 
         self.ctrl: PriceCtrl = config.price_ctrl
         gsheet = GoogleSheetInterface(config=config.drive_config, logger=logger)
+        self.ratings_lookup = RatingsLookup(config.llm_config, logger)
         self._init_parts(
             gsheet=gsheet,
             searcher=MarketSearcher(
@@ -98,6 +101,9 @@ class PriceMonitor:
         monitor.root_logger = logger
         monitor.msg_client = None
         monitor.notifier = MsgNotifier(client=None, logger=monitor.logger)
+        # No lookup client for tests that don't care: _refresh_ratings treats
+        # None as "never make a call".
+        monitor.ratings_lookup = None
         monitor._init_parts(gsheet=gsheet, searcher=searcher)
         return monitor
 
@@ -114,6 +120,9 @@ class PriceMonitor:
             self.ctrl.control_sheet,
             self.logger,
             notify=self.notifier.notify,
+        )
+        self.ratings_tab = RatingsTab(
+            gsheet, self.ctrl.ratings_sheet, self.logger, notify=self.notifier.notify
         )
         self._gsheet = gsheet
         self.stop_event = threading.Event()
@@ -143,7 +152,29 @@ class PriceMonitor:
             return
 
         self.logger.info(f"Pricing {len(due)} items")
+        # Ratings before the sweeps: this run's sweeps read the cache the
+        # refresh just filled, so filling it afterwards would waste a day.
+        self._refresh_ratings()
         self._price_and_record("update", due)
+
+    def _refresh_ratings(self) -> None:
+        """Rate up to one batch of unrated or stale retailers.
+
+        Bounded to a single grounded call per run whatever state the cache is
+        in, so a first run against many retailers spreads over days rather
+        than spending a search on each at once. A failure here logs and
+        returns: ratings are a nicety, prices are the job.
+        """
+        if self.ratings_lookup is None:
+            return
+        try:
+            stale = self.ratings_tab.stale(self.ctrl.rating_rate_d)[:RATING_BATCH]
+            if not stale:
+                return
+            self.logger.info(f"Rating {len(stale)} retailer(s)")
+            self.ratings_tab.store(self.ratings_lookup.fetch(stale))
+        except Exception as exc:
+            self.logger.warning(f"Ratings refresh failed: {exc}")
 
     def _warn_orphaned_history(self, items: list[Item]) -> None:
         """Warn about recorded history no item on the sheet claims any more.
@@ -257,6 +288,7 @@ class PriceMonitor:
     def _price_all(self, items: list[Item]) -> list[PriceReading]:
         last_prices = self.history.last_prices()
         blocked = self.control_tab.blocked()
+        ratings = self._read_ratings()
         source_high = (
             self.history.recent_source_high(self.ctrl.best_window_days)
             if self.ctrl.resweep_thin
@@ -267,11 +299,40 @@ class PriceMonitor:
             if index and self.ctrl.request_delay_s:
                 self.stop_event.wait(self.ctrl.request_delay_s)
             last = last_prices.get(item.name)
-            reading = self._sweep_one(item, last, blocked)
+            reading = self._sweep_one(item, last, blocked, ratings)
             readings.append(
-                self._resweep_if_thin(reading, item, last, blocked, source_high)
+                self._resweep_if_thin(
+                    reading, item, last, blocked, source_high, ratings
+                )
             )
+        self._register_seen()
         return readings
+
+    def _read_ratings(self) -> dict[str, Rating]:
+        """The cached ratings for this sweep, or none if the cache is unreadable.
+
+        An unreadable cache is not this sweep's problem to raise about: it
+        must price items with no ratings rather than not price them at all.
+        """
+        try:
+            return self.ratings_tab.read() or {}
+        except Exception as exc:
+            self.logger.warning(f"Could not read cached ratings: {exc}")
+            return {}
+
+    def _register_seen(self) -> None:
+        """Add retailers this run's sweeps saw to the ratings cache.
+
+        Only the three winning detections reach the history, so a retailer
+        that competed and lost would otherwise never be known about — and
+        could never become best-rated. Called unconditionally, even with an
+        empty set: RatingsTab.register() is already a no-op on one.
+        """
+        seen = getattr(self._searcher, "seen_sites", set())
+        try:
+            self.ratings_tab.register(seen)
+        except Exception as exc:
+            self.logger.warning(f"Could not register retailers: {exc}")
 
     def _resweep_if_thin(
         self,
@@ -280,6 +341,7 @@ class PriceMonitor:
         last_price: float | None,
         blocked: set[str],
         source_high: dict[str, int],
+        ratings: dict[str, Rating],
     ) -> PriceReading:
         """Sweep once more when a result is thin for this item, and keep the better.
 
@@ -298,18 +360,24 @@ class PriceMonitor:
         )
         if self.ctrl.request_delay_s:
             self.stop_event.wait(self.ctrl.request_delay_s)
-        retry = self._sweep_one(item, last_price, blocked)
+        retry = self._sweep_one(item, last_price, blocked, ratings)
         if (retry.sources or 0) <= reading.sources:
             return reading
         note = f"{retry.note}; retried after a thin sweep found {reading.sources}"
         return replace(retry, note=note.lstrip("; "))
 
     def _sweep_one(
-        self, item: Item, last_price: float | None, blocked: set[str]
+        self,
+        item: Item,
+        last_price: float | None,
+        blocked: set[str],
+        ratings: dict[str, Rating],
     ) -> PriceReading:
         timestamp = datetime.now().replace(microsecond=0)
         try:
-            return self._searcher.price_market(item, last_price, timestamp, blocked)
+            return self._searcher.price_market(
+                item, last_price, timestamp, blocked, ratings
+            )
         except Exception as exc:
             # One failed sweep must never abort the rest of the run.
             self.logger.warning(f"Sweep for '{item.name}' failed: {exc}")
