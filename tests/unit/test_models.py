@@ -125,3 +125,23 @@ def test_detection_carries_price_site_and_rating():
 
 def test_detection_rating_defaults_to_empty_for_an_unrated_retailer():
     assert Detection(price=10.0, site="shop.example").rating == ""
+
+
+def test_a_rating_carries_its_score_count_and_source():
+    from price_monitor.models import Rating
+
+    rating = Rating(rating=4.1, reviews=13305, source="trustpilot")
+    assert rating.rating == 4.1
+    assert rating.reviews == 13305
+    assert rating.source == "trustpilot"
+
+
+def test_a_rating_defaults_to_nothing_known():
+    """A site that was looked up and had no rating is a real state, and it is
+    distinct from one that has never been looked up."""
+    from price_monitor.models import Rating
+
+    rating = Rating()
+    assert rating.rating is None
+    assert rating.reviews is None
+    assert rating.source == ""

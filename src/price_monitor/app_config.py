@@ -48,6 +48,7 @@ class PriceCtrl:
     items_sheet: str = "Items"
     history_sheet: str = "Prices"
     control_sheet: str = "Control"
+    ratings_sheet: str = "Ratings"
     currency: str = "GBP"
     # Applied only when the reported price excludes VAT, so recorded history is
     # always VAT-inclusive and comparable run to run. 0.2 = UK standard rate.
@@ -72,6 +73,9 @@ class PriceCtrl:
     # Reports from disappointing sweeps are kept under <secrets>/reports for
     # this many days, so a thin result can be diagnosed without re-running it.
     report_keep_days: int = 30
+    # Ratings move over months while prices move daily, so the cache is
+    # refreshed on its own slow cadence rather than on every sweep.
+    rating_rate_d: float = 30.0
     # A sweep below this confidence is recorded but never announced.
     # Corroboration alone caps a single-source sweep at 0.33, so this threshold
     # is also what decides that one retailer is not a market.

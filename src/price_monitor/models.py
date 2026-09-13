@@ -32,6 +32,20 @@ class PriceStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class Rating:
+    """One retailer's review score, as cached rather than as freshly asked.
+
+    An all-default ``Rating`` means the site was looked up and nothing was
+    found — a different and much cheaper state than never having asked, which
+    is represented by the site being absent from the cache entirely.
+    """
+
+    rating: float | None = None
+    reviews: int | None = None
+    source: str = ""
+
+
+@dataclass(frozen=True)
 class Detection:
     """One retailer's offer, as one of a sweep's three answers.
 

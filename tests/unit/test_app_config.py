@@ -126,3 +126,9 @@ def test_the_new_control_and_reliability_defaults():
     assert ctrl.best_window_days == 7.0
     assert ctrl.resweep_thin is True
     assert ctrl.report_keep_days == 30
+
+
+def test_the_ratings_cache_defaults():
+    ctrl = PriceCtrl()
+    assert ctrl.ratings_sheet == "Ratings"
+    assert ctrl.rating_rate_d == 30.0
