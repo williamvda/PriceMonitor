@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from price_monitor.models import Rating
-from price_monitor.sheets.ratings_tab import COLUMNS, RatingsTab
+from price_monitor.sheets.ratings_tab import COLUMNS, NEVER, RatingsTab
 
 TODAY = datetime.now().strftime("%Y-%m-%d")
 
@@ -29,6 +29,24 @@ class FakeSheet:
         self.writes.append(sheet_name)
         self.frame = df.copy()
         self.error = None
+
+
+class TruncatingSheet(FakeSheet):
+    """The real Sheets API, faithfully: trailing empty cells are omitted from
+    every row, and ``GoogleSheetInterface.read()`` hands the ragged result
+    straight to the DataFrame constructor, which raises when *every* row is
+    short of the header."""
+
+    def read(self, sheet_name: str) -> pd.DataFrame:
+        values = [list(COLUMNS)] + [
+            ["" if pd.isna(cell) else str(cell) for cell in row]
+            for row in self.frame.reindex(columns=COLUMNS).to_numpy()
+        ]
+        rows = [list(row) for row in values[1:]]
+        for row in rows:
+            while row and row[-1] == "":
+                row.pop()
+        return pd.DataFrame(rows, columns=values[0])
 
 
 @pytest.fixture
@@ -93,6 +111,38 @@ def test_a_hand_typed_out_of_range_rating_is_stored_as_none(logger):
         FakeSheet(_rows([_row("argos.co.uk", rating="45")])), "Ratings", logger
     )
     assert tab.read()["argos.co.uk"].rating is None
+
+
+def test_a_registered_row_never_leaves_the_last_column_blank(logger):
+    """`checked` is the only column a placeholder row can fill, and the Sheets
+    API drops trailing empty cells. A blank here made a freshly registered tab
+    unreadable — and every method starts by reading, so nothing could write the
+    value that would repair it."""
+    sheet = FakeSheet(_rows([]))
+    RatingsTab(sheet, "Ratings", logger).register({"diy.com"})
+    assert sheet.frame["checked"].tolist() == [NEVER]
+
+
+def test_a_tab_of_only_placeholders_can_still_be_read(logger):
+    """The live first run wrote eight placeholder rows and then could not read
+    its own tab back. Registering through a sheet that truncates the way the
+    real API does must round-trip."""
+    sheet = TruncatingSheet(_rows([]))
+    tab = RatingsTab(sheet, "Ratings", logger)
+    tab.register({"diy.com", "halfords.com"})
+
+    cached = tab.read()
+    assert cached is not None, "a tab of placeholders must not read as unreadable"
+    assert set(cached) == {"diy.com", "halfords.com"}
+    assert all(rating.rating is None for rating in cached.values())
+    assert tab.stale(30) == ["diy.com", "halfords.com"]
+
+
+def test_the_never_sentinel_counts_as_never_checked(logger):
+    """It must read as 'look it up again', not as a date we cannot parse and
+    therefore skip."""
+    sheet = FakeSheet(_rows([{"site": "diy.com", "checked": NEVER}]))
+    assert RatingsTab(sheet, "Ratings", logger).stale(30) == ["diy.com"]
 
 
 def test_an_unreadable_tab_returns_none_and_is_never_written(logger):
@@ -261,7 +311,10 @@ def test_register_appends_only_unseen_sites(logger):
     sheet = FakeSheet(_rows([_row("argos.co.uk")]))
     RatingsTab(sheet, "Ratings", logger).register({"argos.co.uk", "new.co.uk"})
     assert set(sheet.frame["site"]) == {"argos.co.uk", "new.co.uk"}
-    assert sheet.frame[sheet.frame["site"] == "new.co.uk"].iloc[0]["checked"] == ""
+    registered = sheet.frame[sheet.frame["site"] == "new.co.uk"].iloc[0]
+    # Not blank: the API drops trailing empty cells, which made a tab of only
+    # placeholder rows unreadable. NEVER still counts as never-checked.
+    assert registered["checked"] == NEVER
 
 
 def test_register_writes_nothing_when_every_site_is_known(logger):

@@ -31,6 +31,14 @@ _MAX_RATING = 5.0
 # blank for a site that has been registered but not yet rated.
 COLUMNS = ["site", "rating", "reviews", "source", "checked"]
 
+# A registered-but-unrated row must never leave ``checked`` blank. The Sheets
+# API omits trailing empty cells, so a tab holding only placeholder rows comes
+# back one cell wide against a five-column header and pandas raises inside
+# GoogleSheetInterface.read() — bricking every method here, including the one
+# that would have written the value that repairs it. "never" is not a date, and
+# _as_date already reads anything unparseable as "look it up again".
+NEVER = "never"
+
 
 class RatingsTab:
     """Reads and maintains the cached ratings, never writing over what it can't read."""
@@ -108,7 +116,10 @@ class RatingsTab:
         if not unseen:
             return
         additions = pd.DataFrame(
-            [{**{column: "" for column in COLUMNS}, "site": site} for site in unseen],
+            [
+                {**{column: "" for column in COLUMNS}, "site": site, "checked": NEVER}
+                for site in unseen
+            ],
             columns=COLUMNS,
         )
         self._write(pd.concat([frame, additions], ignore_index=True))
