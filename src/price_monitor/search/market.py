@@ -4,21 +4,33 @@ Asks a search-grounded model what an item costs across UK retailers generally,
 then reports three answers from the candidates that survive validation — the
 best-rated retailer, the cheapest, and the best compromise between them — with
 a confidence score describing how much the sweep supports them. Two calls,
-because grounding and structured output are unreliable together. Nothing raises
-out of :meth:`price_market`.
+because grounding and structured output are unreliable together. Candidate
+ratings come from the caller's rating cache rather than the model, so grounding
+passages go toward finding shops rather than reading Trustpilot;
+:attr:`MarketSearcher.seen_sites` then reports the domains the sweep just kept,
+for the caller to register for later rating. Nothing raises out of
+:meth:`price_market`.
 """
 
 import logging
 import re
+import time
 from datetime import datetime
+from pathlib import Path
 
 from llmbridge import LLMClient
 from llmbridge.exceptions import LLMError
 from py_utils.logger import get_child_logger
 
 from price_monitor.app_config import LLMConfig, PriceCtrl
-from price_monitor.models import Item, PriceReading, PriceStatus
-from price_monitor.search.confidence import Candidate, score
+from price_monitor.models import (
+    Item,
+    PriceReading,
+    PriceStatus,
+    Rating,
+    supplier_domain,
+)
+from price_monitor.search.confidence import Candidate, same_site, score
 from price_monitor.search.detections import select, to_detection
 from price_monitor.search.gemini_search import (
     grounding_sites,
@@ -29,12 +41,6 @@ from price_monitor.search.json_extract import extract_json
 from price_monitor.search.prompts import market_format_prompt, market_prompt
 from price_monitor.search.searcher import FORMAT_PROVIDER, retrying
 from price_monitor.search.validation import normalise_price
-
-# Ratings are reported out of 5. A value outside [0, MAX_RATING] is not a
-# trustworthy score — e.g. the model reported one out of 10 — so it is
-# treated as unknown rather than trusted.
-MAX_RATING = 5.0
-
 
 # The search call is asked to sign off with "END: <n> retailers". Its absence
 # says nothing on its own — a model that forgets the line must not cost a
@@ -59,9 +65,12 @@ class MarketSearcher:
         logger: logging.Logger,
         search_client: LLMClient | None = None,
         format_client: LLMClient | None = None,
+        report_dir: Path | None = None,
     ) -> None:
         self.logger = get_child_logger(logger, __class__.__name__)
         self._ctrl = ctrl
+        self._report_dir = report_dir
+        self.seen_sites: set[str] = set()
         search_provider = config.provider if config.grounded else FORMAT_PROVIDER
         if not config.grounded:
             self.logger.warning(
@@ -87,9 +96,27 @@ class MarketSearcher:
         )
 
     def price_market(
-        self, item: Item, last_price: float | None, timestamp: datetime
+        self,
+        item: Item,
+        last_price: float | None,
+        timestamp: datetime,
+        blocked: set[str] | None = None,
+        ratings: dict[str, Rating] | None = None,
     ) -> PriceReading:
-        """Sweep UK retailers for ``item``, never raising on failure."""
+        """Sweep UK retailers for ``item``, never raising on failure.
+
+        ``blocked`` names retailers the user never wants reported. They are
+        dropped before ranking and do not count toward ``sources`` — a shop
+        you would not buy from is not corroboration.
+
+        ``ratings`` supplies each candidate's rating from the cache, keyed by
+        domain: the sweep prompt no longer asks the model for one.
+        """
+        # Reset here, not in _candidates: every early-return failure path below
+        # skips _candidates entirely, and one searcher is shared across every
+        # item, so a failed sweep must not leave a previous item's sites for
+        # the caller to keep registering.
+        self.seen_sites = set()
         try:
             searched = retrying(
                 lambda: self._search_client.prompt(market_prompt(item)),
@@ -119,10 +146,10 @@ class MarketSearcher:
 
         urls = grounding_urls(searched.raw_response)
         sites = grounding_sites(searched.raw_response)
-        # Pages consulted, not retailers found: the list includes the rating
-        # lookups this prompt asks for (trustpilot.com), price-comparison
-        # sites, and the manufacturer's own site. Comparing its length against
-        # `sources` invites exactly the wrong conclusion.
+        # Pages consulted, not retailers found: the list includes
+        # price-comparison sites and the manufacturer's own site alongside
+        # actual retailers. Comparing its length against `sources` invites
+        # exactly the wrong conclusion.
         self.logger.info(f"Consulted {len(sites)} site(s): {sites}")
 
         try:
@@ -143,7 +170,7 @@ class MarketSearcher:
             self.logger.warning(f"Unparseable market reply for '{item.name}': {exc}")
             return self._failed(item, timestamp, PriceStatus.PARSE_ERROR, str(exc))
 
-        return self._rank(
+        reading = self._rank(
             payload,
             item,
             timestamp,
@@ -152,7 +179,50 @@ class MarketSearcher:
             sites,
             truncated,
             _declared_count(searched.text),
+            blocked or set(),
+            ratings,
         )
+        self._keep_report(item, reading, searched.text, formatted.text)
+        return reading
+
+    def _keep_report(
+        self,
+        item: Item,
+        reading: PriceReading,
+        report: str,
+        converted: str,
+    ) -> None:
+        """Save the raw exchange when a sweep disappoints.
+
+        A thin or failed sweep otherwise leaves nothing to diagnose, and the
+        only way to see what the model actually said is to spend another
+        billed search reproducing it.
+        """
+        if self._report_dir is None:
+            return
+        confident = (reading.confidence or 0.0) >= self._ctrl.min_confidence
+        if confident and reading.status in (PriceStatus.OK, PriceStatus.SUSPECT):
+            return
+        try:
+            self._report_dir.mkdir(parents=True, exist_ok=True)
+            self._prune_reports()
+            safe = re.sub(r"[^A-Za-z0-9]+", "-", item.name)[:60].strip("-")
+            stamp = reading.timestamp.strftime("%Y%m%d-%H%M%S")
+            (self._report_dir / f"{safe}-{stamp}.txt").write_text(
+                f"item: {item.name}\nstatus: {reading.status.value}\n"
+                f"confidence: {reading.confidence}\nsources: {reading.sources}\n"
+                f"note: {reading.note}\n\n--- search report ---\n{report}\n"
+                f"\n--- converted ---\n{converted}\n"
+            )
+        except OSError as exc:
+            # Diagnostics are never worth failing a sweep for.
+            self.logger.warning(f"Could not keep the report for '{item.name}': {exc}")
+
+    def _prune_reports(self) -> None:
+        cutoff = time.time() - self._ctrl.report_keep_days * 86400
+        for path in self._report_dir.glob("*.txt"):
+            if path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
 
     def _rank(
         self,
@@ -164,8 +234,10 @@ class MarketSearcher:
         sites: list[str],
         truncated: bool = False,
         declared: int | None = None,
+        blocked: set[str] | None = None,
+        ratings: dict[str, Rating] | None = None,
     ) -> PriceReading:
-        pairs = self._candidates(payload)
+        pairs = self._candidates(payload, blocked or set(), ratings)
         if not pairs:
             note = str(payload.get("note") or "").strip() or "no usable candidates"
             return self._failed(item, timestamp, PriceStatus.NOT_FOUND, note)
@@ -246,7 +318,12 @@ class MarketSearcher:
         )
         return f"converted {kept} of {declared} retailers reported"
 
-    def _candidates(self, payload: dict) -> list[tuple[Candidate, str]]:
+    def _candidates(
+        self,
+        payload: dict,
+        blocked: set[str],
+        ratings: dict[str, Rating] | None,
+    ) -> list[tuple[Candidate, str]]:
         """Validated, in-stock candidates, VAT-normalised.
 
         Each candidate is paired with the VAT-adjustment note
@@ -268,22 +345,22 @@ class MarketSearcher:
             if raw.get("in_stock", True) is False:
                 continue
 
-            rating = _as_float(raw.get("rating"))
-            if rating is not None and not (0.0 <= rating <= MAX_RATING):
-                # Ratings are out of 5. A value outside that range (a rating
-                # out of 10, or a review count mistaken for a score) is not a
-                # trustworthy 5-point score, so it is treated as unknown
-                # rather than displayed as one.
-                rating = None
-            count = _as_int(raw.get("rating_count"))
+            site = supplier_domain(str(raw.get("url") or ""))
+            if site and any(same_site(site, entry) for entry in blocked):
+                self.logger.info(f"Skipping blocked retailer {site}")
+                continue
+
+            cached = (ratings or {}).get(site, Rating())
+            if site:
+                self.seen_sites.add(site)
             candidate = Candidate(
                 supplier=str(raw.get("supplier") or "").strip(),
                 price=price,
                 url=str(raw.get("url") or "").strip(),
                 in_stock=True,
-                rating=rating,
-                rating_count=count,
-                rating_source=str(raw.get("rating_source") or "").strip(),
+                rating=cached.rating,
+                rating_count=cached.reviews,
+                rating_source=cached.source,
             )
             candidates.append((candidate, vat_note))
         return candidates
@@ -298,21 +375,3 @@ class MarketSearcher:
             status=status,
             note=note,
         )
-
-
-def _as_float(value: object) -> float | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _as_int(value: object) -> int | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None

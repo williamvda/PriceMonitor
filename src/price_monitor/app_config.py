@@ -47,6 +47,8 @@ class PriceCtrl:
     poll_rate_m: float = 5.0
     items_sheet: str = "Items"
     history_sheet: str = "Prices"
+    control_sheet: str = "Control"
+    ratings_sheet: str = "Ratings"
     currency: str = "GBP"
     # Applied only when the reported price excludes VAT, so recorded history is
     # always VAT-inclusive and comparable run to run. 0.2 = UK standard rate.
@@ -60,6 +62,20 @@ class PriceCtrl:
     # tracks jitter rather than a settled price, so a "drop" against it would
     # say nothing. At the default 24h refresh a new item is quiet for 3 days.
     min_readings: int = 3
+    # `cheapest_*` reports the best price seen across this many days rather
+    # than the latest sweep's. A single sweep is a weak sample — the same
+    # query has returned three retailers on one run and one on the next.
+    best_window_days: float = 7.0
+    # Sweep an item a second time when it finds fewer retailers than it
+    # managed inside that window. Costs one extra billed search, and only on
+    # a result that looks wrong for that item.
+    resweep_thin: bool = True
+    # Reports from disappointing sweeps are kept under <secrets>/reports for
+    # this many days, so a thin result can be diagnosed without re-running it.
+    report_keep_days: int = 30
+    # Ratings move over months while prices move daily, so the cache is
+    # refreshed on its own slow cadence rather than on every sweep.
+    rating_rate_d: float = 30.0
     # A sweep below this confidence is recorded but never announced.
     # Corroboration alone caps a single-source sweep at 0.33, so this threshold
     # is also what decides that one retailer is not a market.

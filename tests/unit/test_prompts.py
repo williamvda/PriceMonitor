@@ -25,12 +25,6 @@ def test_market_prompt_permits_a_single_retailer_without_excusing_a_short_search
     assert "do not stop searching early" in prompt
 
 
-def test_market_prompt_forbids_estimating_a_rating():
-    prompt = market_prompt(Item(name="Widget"))
-    assert "Trustpilot" in prompt
-    assert "do not estimate one" in prompt
-
-
 def test_market_prompt_forbids_guessing_a_price():
     assert "Do not guess a price" in market_prompt(Item(name="Widget"))
 
@@ -64,9 +58,6 @@ def test_market_format_prompt_names_every_schema_field():
         "url",
         "in_stock",
         "vat_included",
-        "rating",
-        "rating_count",
-        "rating_source",
     ):
         assert f'"{field}"' in prompt
 
@@ -78,3 +69,18 @@ def test_market_prompt_asks_for_a_terminating_count():
     prompt = market_prompt(Item(name="Widget"))
     assert "END: <n> retailers" in prompt
     assert "how many retailers you listed" in prompt
+
+
+def test_the_sweep_no_longer_asks_for_ratings():
+    """Gemini spent grounding passages reading Trustpilot because we asked it
+    to. Those passages are wanted for finding shops."""
+    prompt = market_prompt(Item(name="Widget"))
+    assert "Trustpilot" not in prompt
+    assert "rating" not in prompt.lower()
+
+
+def test_the_format_schema_no_longer_carries_rating_fields():
+    schema = market_format_prompt("report", [])
+    assert "rating" not in schema
+    assert "rating_count" not in schema
+    assert "rating_source" not in schema

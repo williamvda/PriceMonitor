@@ -1,12 +1,13 @@
-"""Shared retry loop for the search-provider calls in ``market.py``.
+"""Shared retry loop for the search-provider calls under ``price_monitor.search``.
 
 Both the search and format calls retry transient server-side failures with
 exponential backoff; see :func:`retrying` for the retry mechanism and
 :func:`_is_retryable` for what counts as transient.
 
 Exports :func:`retrying` (the retry loop) and :const:`FORMAT_PROVIDER` (the
-un-grounded provider name), both consumed by
-:class:`~price_monitor.search.market.MarketSearcher`.
+un-grounded provider name), consumed by
+:class:`~price_monitor.search.market.MarketSearcher` and by
+:class:`~price_monitor.search.ratings.RatingsLookup`.
 """
 
 import logging

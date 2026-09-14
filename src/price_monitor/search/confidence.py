@@ -108,12 +108,12 @@ def _sourcing(winner: Candidate, cited_sites: list[str]) -> tuple[float, str]:
     if not url.startswith(("http://", "https://")):
         return 0.3, "no source url"
     domain = supplier_domain(url)
-    if domain and any(_same_site(domain, site) for site in cited_sites):
+    if domain and any(same_site(domain, site) for site in cited_sites):
         return 1.0, "cited"
     return 0.6, "uncited url"
 
 
-def _same_site(domain: str, cited: str) -> bool:
+def same_site(domain: str, cited: str) -> bool:
     """True when a cited site name refers to the winner's domain.
 
     Gemini cites a site by name, which may be the bare domain or only its

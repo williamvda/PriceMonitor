@@ -24,11 +24,6 @@ shop all count. For each retailer report:
 - whether it is in stock
 - the exact URL of the page you read the price from
 
-For each retailer also report its Trustpilot rating out of 5 and how many
-reviews that rating is based on. If the retailer has no Trustpilot page, use its
-Google review rating instead and say which of the two you used. If you cannot
-find a rating, say unknown — do not estimate one.
-
 Only list the same product — the same model and variant. Do not list
 accessories, bundles, multipacks, refurbished or used items unless the product
 name asks for one. Do not guess a price; list only prices you actually saw.
@@ -55,10 +50,7 @@ Schema:
       "currency": "<ISO 4217 code>",
       "url": "<string>",
       "in_stock": <true or false>,
-      "vat_included": <true or false>,
-      "rating": <number or null>,
-      "rating_count": <integer or null>,
-      "rating_source": "trustpilot" | "google" | ""
+      "vat_included": <true or false>
     }}
   ],
   "note": "<string>"
@@ -71,10 +63,6 @@ Rules:
   the report does not say, set it to true so no tax is added to a price that may
   already include it. Never adjust a price yourself.
 - price is a plain number: no currency symbol, no thousands separators.
-- rating and rating_count are null when the report gives no rating for that
-  retailer. Never invent a rating.
-- rating_source is "trustpilot" or "google" — whichever the report used — and ""
-  when there is no rating.
 - Output the JSON object only. No markdown fences, no commentary.
 
 Known source URLs: {urls}

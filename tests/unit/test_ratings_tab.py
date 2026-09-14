@@ -1,0 +1,377 @@
+"""Tests for the cached Ratings tab."""
+
+import logging
+from datetime import datetime, timedelta
+
+import pandas as pd
+import pytest
+
+from price_monitor.models import Rating
+from price_monitor.sheets.ratings_tab import COLUMNS, NEVER, RatingsTab
+
+TODAY = datetime.now().strftime("%Y-%m-%d")
+
+
+class FakeSheet:
+    def __init__(
+        self, frame: pd.DataFrame | None = None, error: Exception | None = None
+    ):
+        self.frame = frame if frame is not None else pd.DataFrame()
+        self.error = error
+        self.writes: list[str] = []
+
+    def read(self, sheet_name: str) -> pd.DataFrame:
+        if self.error is not None:
+            raise self.error
+        return self.frame.copy()
+
+    def write(self, sheet_name: str, df: pd.DataFrame) -> None:
+        self.writes.append(sheet_name)
+        self.frame = df.copy()
+        self.error = None
+
+
+class TruncatingSheet(FakeSheet):
+    """The real Sheets API, faithfully: trailing empty cells are omitted from
+    every row, and ``GoogleSheetInterface.read()`` hands the ragged result
+    straight to the DataFrame constructor, which raises when *every* row is
+    short of the header."""
+
+    def read(self, sheet_name: str) -> pd.DataFrame:
+        values = [list(COLUMNS)] + [
+            ["" if pd.isna(cell) else str(cell) for cell in row]
+            for row in self.frame.reindex(columns=COLUMNS).to_numpy()
+        ]
+        rows = [list(row) for row in values[1:]]
+        for row in rows:
+            while row and row[-1] == "":
+                row.pop()
+        return pd.DataFrame(rows, columns=values[0])
+
+
+@pytest.fixture
+def logger():
+    return logging.getLogger("test")
+
+
+def _rows(rows: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(rows, columns=COLUMNS)
+
+
+def _row(site: str, rating: str = "4.1", checked: str = TODAY) -> dict:
+    return {
+        "site": site,
+        "rating": rating,
+        "reviews": "900",
+        "source": "trustpilot",
+        "checked": checked,
+    }
+
+
+def test_columns_end_with_checked_so_trailing_cells_are_never_trimmed():
+    assert COLUMNS[-1] == "checked"
+
+
+def test_ratings_are_read_by_site(logger):
+    tab = RatingsTab(FakeSheet(_rows([_row("argos.co.uk")])), "Ratings", logger)
+    ratings = tab.read()
+    assert ratings["argos.co.uk"].rating == 4.1
+    assert ratings["argos.co.uk"].reviews == 900
+    assert ratings["argos.co.uk"].source == "trustpilot"
+
+
+def test_a_checked_site_with_no_rating_reads_as_a_known_blank(logger):
+    """'We asked and there was nothing' must be distinguishable from
+    'we have not asked', or it would be looked up forever."""
+    frame = _rows(
+        [
+            {
+                "site": "tiny.co.uk",
+                "rating": "",
+                "reviews": "",
+                "source": "",
+                "checked": TODAY,
+            }
+        ]
+    )
+    ratings = RatingsTab(FakeSheet(frame), "Ratings", logger).read()
+    assert "tiny.co.uk" in ratings
+    assert ratings["tiny.co.uk"].rating is None
+
+
+def test_an_empty_tab_reads_as_no_ratings(logger):
+    assert RatingsTab(FakeSheet(), "Ratings", logger).read() == {}
+
+
+def test_a_hand_typed_out_of_range_rating_is_stored_as_none(logger):
+    """A retailer's rating enters from two places — the automated lookup and
+    a human correcting it by hand — and neither can vouch for the other, so
+    the same five-point guard applies to a hand-typed value too."""
+    tab = RatingsTab(
+        FakeSheet(_rows([_row("argos.co.uk", rating="45")])), "Ratings", logger
+    )
+    assert tab.read()["argos.co.uk"].rating is None
+
+
+def test_a_registered_row_never_leaves_the_last_column_blank(logger):
+    """`checked` is the only column a placeholder row can fill, and the Sheets
+    API drops trailing empty cells. A blank here made a freshly registered tab
+    unreadable — and every method starts by reading, so nothing could write the
+    value that would repair it."""
+    sheet = FakeSheet(_rows([]))
+    RatingsTab(sheet, "Ratings", logger).register({"diy.com"})
+    assert sheet.frame["checked"].tolist() == [NEVER]
+
+
+def test_a_tab_of_only_placeholders_can_still_be_read(logger):
+    """The live first run wrote eight placeholder rows and then could not read
+    its own tab back. Registering through a sheet that truncates the way the
+    real API does must round-trip."""
+    sheet = TruncatingSheet(_rows([]))
+    tab = RatingsTab(sheet, "Ratings", logger)
+    tab.register({"diy.com", "halfords.com"})
+
+    cached = tab.read()
+    assert cached is not None, "a tab of placeholders must not read as unreadable"
+    assert set(cached) == {"diy.com", "halfords.com"}
+    assert all(rating.rating is None for rating in cached.values())
+    assert tab.stale(30) == ["diy.com", "halfords.com"]
+
+
+def test_the_never_sentinel_counts_as_never_checked(logger):
+    """It must read as 'look it up again', not as a date we cannot parse and
+    therefore skip."""
+    sheet = FakeSheet(_rows([{"site": "diy.com", "checked": NEVER}]))
+    assert RatingsTab(sheet, "Ratings", logger).stale(30) == ["diy.com"]
+
+
+def test_an_unreadable_tab_returns_none_and_is_never_written(logger):
+    """write() clears before it writes, so a tab we cannot read must not be
+    touched — it may still hold every rating we have."""
+    sheet = FakeSheet(error=ValueError("2 columns passed, passed data had 1 columns"))
+    tab = RatingsTab(sheet, "Ratings", logger)
+    assert tab.read() is None
+    tab.register({"argos.co.uk"})
+    tab.store({"argos.co.uk": Rating(4.1, 900, "trustpilot")})
+    assert sheet.writes == []
+
+
+def test_an_unreadable_tab_notifies_only_once_per_run(logger):
+    """update() calls _frame() up to three times (stale, read, register); a
+    tab that stays broken for all three must still page once, not thrice."""
+    sent: list[str] = []
+    sheet = FakeSheet(error=RuntimeError("503 Service Unavailable"))
+    tab = RatingsTab(sheet, "Ratings", logger, notify=sent.append)
+    tab.stale(30)
+    tab.read()
+    tab.register({"argos.co.uk"})
+    assert len(sent) == 1
+
+
+def test_suppressing_the_alert_does_not_suppress_the_log(logger, caplog):
+    """The alert is deduplicated; the log is the record of what happened. A
+    second, different failure must still be traceable in the log even though
+    the user is not paged twice."""
+    sent: list[str] = []
+    sheet = FakeSheet(error=RuntimeError("503 Service Unavailable"))
+    tab = RatingsTab(sheet, "Ratings", logger, notify=sent.append)
+    with caplog.at_level(logging.WARNING):
+        tab.read()
+        sheet.error = ValueError("2 columns passed, passed data had 1 columns")
+        tab.read()
+
+    logged = "\n".join(record.message for record in caplog.records)
+    assert len(sent) == 1
+    assert "503 Service Unavailable" in logged
+    assert "passed data had 1 columns" in logged
+
+
+def test_a_recovered_tab_can_notify_again_on_a_later_failure(logger):
+    """The suppression flag must not be a lifetime ban: a tab that comes back
+    healthy and later breaks again is a new problem worth a new alert."""
+    sent: list[str] = []
+    sheet = FakeSheet(error=RuntimeError("503 Service Unavailable"))
+    tab = RatingsTab(sheet, "Ratings", logger, notify=sent.append)
+    tab.read()
+    assert len(sent) == 1
+
+    sheet.error = None
+    tab.read()
+
+    sheet.error = RuntimeError("503 again")
+    tab.read()
+    assert len(sent) == 2
+
+
+def test_a_missing_tab_is_created_empty(logger):
+    sheet = FakeSheet(error=RuntimeError("Unable to parse range: Ratings"))
+    assert RatingsTab(sheet, "Ratings", logger).read() == {}
+    assert sheet.writes == ["Ratings"]
+    assert list(sheet.frame.columns) == COLUMNS
+
+
+def test_a_missing_tab_is_recognised_case_insensitively(logger):
+    sheet = FakeSheet(error=RuntimeError("UNABLE TO PARSE RANGE: Ratings"))
+    assert RatingsTab(sheet, "Ratings", logger).read() == {}
+    assert sheet.writes == ["Ratings"]
+
+
+def test_a_transient_error_does_not_create_or_write_the_tab(logger):
+    """A 503 or a timeout must be treated exactly like the unreadable case:
+    no create, no write, no cached ratings used this run — never the
+    'tab does not exist' path, which would wipe the whole cache."""
+    sheet = FakeSheet(error=RuntimeError("503 Service Unavailable"))
+    tab = RatingsTab(sheet, "Ratings", logger)
+    assert tab.read() is None
+    tab.register({"argos.co.uk"})
+    tab.store({"argos.co.uk": Rating(4.1, 900, "trustpilot")})
+    assert sheet.writes == []
+
+
+def test_stale_includes_sites_never_checked(logger):
+    frame = _rows(
+        [
+            {
+                "site": "new.co.uk",
+                "rating": "",
+                "reviews": "",
+                "source": "",
+                "checked": "",
+            }
+        ]
+    )
+    assert RatingsTab(FakeSheet(frame), "Ratings", logger).stale(30) == ["new.co.uk"]
+
+
+def test_stale_includes_sites_checked_too_long_ago(logger):
+    old = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+    frame = _rows([_row("argos.co.uk", checked=old)])
+    assert RatingsTab(FakeSheet(frame), "Ratings", logger).stale(30) == ["argos.co.uk"]
+
+
+def test_stale_excludes_a_recently_checked_site(logger):
+    frame = _rows([_row("argos.co.uk", checked=TODAY)])
+    assert RatingsTab(FakeSheet(frame), "Ratings", logger).stale(30) == []
+
+
+def test_an_unparseable_date_counts_as_never_checked(logger):
+    """A hand-edited cell must make a site stale, never permanently fresh."""
+    frame = _rows([_row("argos.co.uk", checked="last tuesday")])
+    assert RatingsTab(FakeSheet(frame), "Ratings", logger).stale(30) == ["argos.co.uk"]
+
+
+def test_a_future_checked_date_counts_as_never_checked(logger):
+    """A date we could not have written is a hand-edit error, and the safe
+    direction for an error is always 'look it up again', never 'never look
+    again' — otherwise a typo'd year freezes that retailer's rating for
+    decades."""
+    future = (datetime.now() + timedelta(days=5 * 365)).strftime("%Y-%m-%d")
+    frame = _rows([_row("argos.co.uk", checked=future)])
+    assert RatingsTab(FakeSheet(frame), "Ratings", logger).stale(30) == ["argos.co.uk"]
+
+
+def test_a_future_checked_date_is_grouped_with_never_checked_sites(logger):
+    old = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+    future = (datetime.now() + timedelta(days=5 * 365)).strftime("%Y-%m-%d")
+    frame = _rows(
+        [
+            _row("old.co.uk", checked=old),
+            _row("future.co.uk", checked=future),
+        ]
+    )
+    assert RatingsTab(FakeSheet(frame), "Ratings", logger).stale(30) == [
+        "future.co.uk",
+        "old.co.uk",
+    ]
+
+
+def test_never_checked_sites_come_before_merely_stale_ones(logger):
+    """A retailer we have never rated is worth more than refreshing one we
+    already have a usable number for."""
+    old = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+    frame = _rows(
+        [
+            _row("old.co.uk", checked=old),
+            {
+                "site": "new.co.uk",
+                "rating": "",
+                "reviews": "",
+                "source": "",
+                "checked": "",
+            },
+        ]
+    )
+    assert RatingsTab(FakeSheet(frame), "Ratings", logger).stale(30) == [
+        "new.co.uk",
+        "old.co.uk",
+    ]
+
+
+def test_register_appends_only_unseen_sites(logger):
+    sheet = FakeSheet(_rows([_row("argos.co.uk")]))
+    RatingsTab(sheet, "Ratings", logger).register({"argos.co.uk", "new.co.uk"})
+    assert set(sheet.frame["site"]) == {"argos.co.uk", "new.co.uk"}
+    registered = sheet.frame[sheet.frame["site"] == "new.co.uk"].iloc[0]
+    # Not blank: the API drops trailing empty cells, which made a tab of only
+    # placeholder rows unreadable. NEVER still counts as never-checked.
+    assert registered["checked"] == NEVER
+
+
+def test_register_writes_nothing_when_every_site_is_known(logger):
+    sheet = FakeSheet(_rows([_row("argos.co.uk")]))
+    RatingsTab(sheet, "Ratings", logger).register({"argos.co.uk"})
+    assert sheet.writes == []
+
+
+def test_store_stamps_checked_even_for_a_site_with_no_rating(logger):
+    """Otherwise a retailer with no Trustpilot presence is looked up forever."""
+    sheet = FakeSheet(
+        _rows(
+            [
+                {
+                    "site": "tiny.co.uk",
+                    "rating": "",
+                    "reviews": "",
+                    "source": "",
+                    "checked": "",
+                }
+            ]
+        )
+    )
+    RatingsTab(sheet, "Ratings", logger).store({"tiny.co.uk": Rating()})
+    row = sheet.frame.iloc[0]
+    assert row["checked"] == TODAY
+    assert row["rating"] == ""
+
+
+def test_a_comma_formatted_review_count_is_not_lost(logger):
+    """Review counts gate MIN_RATING_COUNT, so a real count silently going
+    blank can flip a rating from trusted to untrusted."""
+    frame = _rows([_row("argos.co.uk", rating="4.1")])
+    frame.loc[0, "reviews"] = "1,200"
+    ratings = RatingsTab(FakeSheet(frame), "Ratings", logger).read()
+    assert ratings["argos.co.uk"].reviews == 1200
+
+
+def test_store_updates_an_existing_row_rather_than_duplicating_it(logger):
+    sheet = FakeSheet(_rows([_row("argos.co.uk", rating="3.0")]))
+    RatingsTab(sheet, "Ratings", logger).store(
+        {"argos.co.uk": Rating(4.4, 1200, "trustpilot")}
+    )
+    assert len(sheet.frame) == 1
+    assert sheet.frame.iloc[0]["rating"] == "4.4"
+
+
+def test_a_hand_typed_mixed_case_site_is_found_by_a_lowercase_lookup(logger):
+    """The README invites hand-typing a site to merge the model's three
+    spellings of one retailer into one row; that row must actually match the
+    lowercase domain every producer emits, or it is inert."""
+    sheet = FakeSheet(_rows([_row("Argos.co.uk")]))
+    tab = RatingsTab(sheet, "Ratings", logger)
+    ratings = tab.read()
+    assert "argos.co.uk" in ratings
+    assert "Argos.co.uk" not in ratings
+    assert tab.stale(30) == []
+
+    tab.register({"argos.co.uk"})
+    assert sheet.writes == [], "must not append a second, lowercase row"

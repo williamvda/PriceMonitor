@@ -4,6 +4,7 @@ import logging
 import signal
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 from unittest import mock
 
@@ -44,11 +45,22 @@ class FakeMarketSearcher:
         self.swept: list[str] = []
         self.raises: Exception | None = None
         self.seen_last_price: float | None = None
+        self.calls: list[str] = []
+        self.blocked_seen: set[str] | None = None
+        self.sources_sequence: list[int] = []
+        self.seen_sites: set[str] = set()
 
     def price_market(
-        self, item: Item, last_price: float | None, timestamp: datetime
+        self,
+        item: Item,
+        last_price: float | None,
+        timestamp: datetime,
+        blocked: set[str] | None = None,
+        ratings: dict | None = None,
     ) -> PriceReading:
         self.swept.append(item.name)
+        self.calls.append(item.name)
+        self.blocked_seen = blocked
         self.seen_last_price = last_price
         if self.raises is not None:
             raise self.raises
@@ -62,7 +74,7 @@ class FakeMarketSearcher:
             best_value=Detection(self.price + 5.0, "very.co.uk", "4.5 Trustpilot"),
             note="3 sources, cited",
             confidence=self.confidence,
-            sources=3,
+            sources=(self.sources_sequence.pop(0) if self.sources_sequence else 3),
         )
 
 
@@ -95,7 +107,11 @@ _FRESH = timedelta(hours=_REFRESH_H / 2)
 
 
 def _history_row(
-    item: str, when: datetime, price: float | None = 100.0, status: str = "ok"
+    item: str,
+    when: datetime,
+    price: float | None = 100.0,
+    status: str = "ok",
+    sources: str = "3",
 ) -> dict[str, str]:
     cell = "" if price is None else f"{price:.2f}"
     return {
@@ -111,7 +127,7 @@ def _history_row(
         "value_site": "argos.co.uk",
         "value_rating": "4.4 Trustpilot",
         "confidence": "0.90",
-        "sources": "3",
+        "sources": sources,
         "note": "",
         "status": status,
     }
@@ -174,7 +190,7 @@ def test_poll_sweeps_only_the_new_item(logger, searcher):
 
 def test_a_failing_sweep_does_not_stop_the_others(logger):
     class Exploding(FakeMarketSearcher):
-        def price_market(self, item, last_price, timestamp):
+        def price_market(self, item, last_price, timestamp, blocked=None, ratings=None):
             if item.name == "Widget":
                 raise RuntimeError("boom")
             return super().price_market(item, last_price, timestamp)
@@ -662,3 +678,226 @@ def test_no_orphan_warning_when_every_item_still_matches(logger, searcher, caplo
     with caplog.at_level(logging.WARNING):
         _monitor(sheet, searcher, logger).update()
     assert "no longer on the" not in "\n".join(r.message for r in caplog.records)
+
+
+def test_a_thin_sweep_is_retried_against_the_items_own_recent_best(logger):
+    """WeeRide returned 3, 3, then 1 sources for the same query. A sweep is
+    judged against what that item usually manages, not a fixed bar."""
+    sheet = _sheet_with_history(
+        [_history_row("Widget", datetime.now() - _STALE, sources="3")], ["Widget"]
+    )
+    searcher = FakeMarketSearcher()
+    searcher.sources_sequence = [1, 3]
+    _monitor(sheet, searcher, logger).update()
+    assert len(searcher.calls) == 2, "a thin result should be swept once more"
+
+
+def test_only_the_better_of_the_two_sweeps_is_recorded(logger):
+    """Appending both would double the item's history and drag its mean
+    toward a result we already believe is wrong."""
+    sheet = _sheet_with_history(
+        [_history_row("Widget", datetime.now() - _STALE, sources="3")], ["Widget"]
+    )
+    searcher = FakeMarketSearcher()
+    searcher.sources_sequence = [1, 3]
+    _monitor(sheet, searcher, logger).update()
+    appended = sheet.tabs["Prices"]
+    assert len(appended) == 2, "one prior row plus one new one"
+    assert appended.iloc[-1]["sources"] == "3"
+
+
+def test_a_genuinely_single_source_item_is_never_retried(logger):
+    """Its own history says one retailer is all there is, so nothing is wrong."""
+    sheet = _sheet_with_history(
+        [_history_row("Widget", datetime.now() - _STALE, sources="1")], ["Widget"]
+    )
+    searcher = FakeMarketSearcher()
+    searcher.sources_sequence = [1, 1]
+    _monitor(sheet, searcher, logger).update()
+    assert len(searcher.calls) == 1
+
+
+def test_the_retry_can_be_turned_off(logger):
+    """It spends real money on a guess, so it must be switchable."""
+    sheet = _sheet_with_history(
+        [_history_row("Widget", datetime.now() - _STALE, sources="3")], ["Widget"]
+    )
+    searcher = FakeMarketSearcher()
+    searcher.sources_sequence = [1, 3]
+    monitor = _monitor(sheet, searcher, logger)
+    monitor.ctrl = replace(monitor.ctrl, resweep_thin=False)
+    monitor.update()
+    assert len(searcher.calls) == 1
+
+
+def test_blocked_sites_reach_the_searcher(logger):
+    sheet = _sheet_with_history(
+        [_history_row("Widget", datetime.now() - _STALE)], ["Widget"]
+    )
+    sheet.tabs["Control"] = pd.DataFrame({"blocked": ["amazon.co.uk"]})
+    searcher = FakeMarketSearcher()
+    _monitor(sheet, searcher, logger).update()
+    assert searcher.blocked_seen == {"amazon.co.uk"}
+
+
+# --- ratings cache -----------------------------------------------------------
+
+
+class _FakeRatingsTab:
+    def __init__(self, stale=None, raises=None, on_call=None):
+        self._stale = stale if stale is not None else []
+        self._raises = raises
+        self._on_call = on_call or (lambda _name: None)
+        self.registered: set[str] = set()
+        self.stored: dict = {}
+
+    def read(self):
+        if self._raises is not None:
+            raise self._raises
+        return {}
+
+    def stale(self, within_days):
+        if self._raises is not None:
+            raise self._raises
+        return self._stale
+
+    def register(self, sites):
+        self._on_call("register")
+        self.registered = set(sites)
+
+    def store(self, results):
+        self.stored = results
+
+
+class _FakeLookup:
+    def __init__(self, on_call=None):
+        self._on_call = on_call or (lambda _name: None)
+        self.fetched: list[list[str]] = []
+
+    def fetch(self, sites):
+        self._on_call("fetch")
+        self.fetched.append(list(sites))
+        return {}
+
+
+def test_stale_ratings_are_refreshed_before_the_sweeps(logger):
+    """The sweep needs the cache, so filling it afterwards would waste a day."""
+    order: list[str] = []
+    sheet = _sheet_with_history(
+        [_history_row("Widget", datetime.now() - _STALE)], ["Widget"]
+    )
+    searcher = FakeMarketSearcher()
+    # Registration is skipped on an empty set (it costs a Sheets read for
+    # nothing), so this needs a real site for "register" to actually fire.
+    searcher.seen_sites = {"argos.co.uk"}
+    monitor = _monitor(sheet, searcher, logger)
+    monitor.ratings_tab = _FakeRatingsTab(stale=["argos.co.uk"], on_call=order.append)
+    monitor.ratings_lookup = _FakeLookup(on_call=order.append)
+    monitor.update()
+    assert order.index("fetch") < order.index("register")
+
+
+def test_sites_the_sweep_saw_are_registered_afterwards(logger):
+    sheet = _sheet_with_history(
+        [_history_row("Widget", datetime.now() - _STALE)], ["Widget"]
+    )
+    searcher = FakeMarketSearcher()
+    searcher.seen_sites = {"argos.co.uk", "currys.co.uk"}
+    monitor = _monitor(sheet, searcher, logger)
+    tab = _FakeRatingsTab()
+    monitor.ratings_tab = tab
+    monitor.update()
+    assert tab.registered == {"argos.co.uk", "currys.co.uk"}
+
+
+def test_nothing_stale_makes_no_lookup(logger):
+    sheet = _sheet_with_history(
+        [_history_row("Widget", datetime.now() - _STALE)], ["Widget"]
+    )
+    monitor = _monitor(sheet, FakeMarketSearcher(), logger)
+    monitor.ratings_tab = _FakeRatingsTab(stale=[])
+    lookup = _FakeLookup()
+    monitor.ratings_lookup = lookup
+    monitor.update()
+    assert lookup.fetched == []
+
+
+def test_only_one_batch_is_looked_up_per_run(logger):
+    """A first run against fifty retailers must not spend fifty searches."""
+    sheet = _sheet_with_history(
+        [_history_row("Widget", datetime.now() - _STALE)], ["Widget"]
+    )
+    monitor = _monitor(sheet, FakeMarketSearcher(), logger)
+    monitor.ratings_tab = _FakeRatingsTab(stale=[f"shop{n}.co.uk" for n in range(50)])
+    lookup = _FakeLookup()
+    monitor.ratings_lookup = lookup
+    monitor.update()
+    assert len(lookup.fetched[0]) == 10
+
+
+def test_a_ratings_failure_does_not_stop_the_sweep(logger):
+    """Ratings are a nicety; prices are the job."""
+    sheet = _sheet_with_history(
+        [_history_row("Widget", datetime.now() - _STALE)], ["Widget"]
+    )
+    searcher = FakeMarketSearcher()
+    monitor = _monitor(sheet, searcher, logger)
+    monitor.ratings_tab = _FakeRatingsTab(
+        stale=["argos.co.uk"], raises=RuntimeError("sheet down")
+    )
+    monitor.update()
+    assert searcher.calls == ["Widget"]
+
+
+def test_a_failed_items_sites_do_not_clobber_a_prior_items_registration(logger):
+    """test_market.py proves seen_sites resets to empty on a failed sweep;
+    test_every_items_seen_sites_are_registered_not_just_the_last proves sites
+    accumulate across successful items. Neither covers the intersection: a
+    run where item 1 succeeds and item 2 fails must still register item 1's
+    retailers, and nothing from item 2."""
+
+    class PerItemSearcher(FakeMarketSearcher):
+        def price_market(self, item, last_price, timestamp, blocked=None, ratings=None):
+            if item.name == "Widget":
+                self.seen_sites = {"argos.co.uk"}
+                return super().price_market(
+                    item, last_price, timestamp, blocked, ratings
+                )
+            # Mirrors MarketSearcher's real behaviour: a failed sweep resets
+            # seen_sites to empty before this caller ever sees it.
+            self.seen_sites = set()
+            return PriceReading(
+                timestamp=timestamp,
+                item=item.name,
+                currency="GBP",
+                status=PriceStatus.PARSE_ERROR,
+            )
+
+    sheet = FakeSheet({"Items": _items(["Widget", "Gadget"])})
+    searcher = PerItemSearcher()
+    monitor = _monitor(sheet, searcher, logger)
+    tab = _FakeRatingsTab()
+    monitor.ratings_tab = tab
+    monitor.update()
+    assert tab.registered == {"argos.co.uk"}
+
+
+def test_every_items_seen_sites_are_registered_not_just_the_last(logger):
+    """seen_sites resets on every sweep, so registering once after the loop
+    must accumulate across items, not just read the last item's leftovers."""
+
+    class PerItemSearcher(FakeMarketSearcher):
+        def price_market(self, item, last_price, timestamp, blocked=None, ratings=None):
+            reading = super().price_market(
+                item, last_price, timestamp, blocked, ratings
+            )
+            self.seen_sites = {f"{item.name.lower()}-shop.co.uk"}
+            return reading
+
+    sheet = FakeSheet({"Items": _items(["Widget", "Gadget"])})
+    searcher = PerItemSearcher()
+    monitor = _monitor(sheet, searcher, logger)
+    tab = _FakeRatingsTab()
+    monitor.ratings_tab = tab
+    monitor.update()
+    assert tab.registered == {"widget-shop.co.uk", "gadget-shop.co.uk"}

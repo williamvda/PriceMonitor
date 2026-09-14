@@ -8,7 +8,7 @@ are coerced on read and rendered back as strings on write.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 from py_utils.logger import get_child_logger
@@ -49,6 +49,7 @@ COLUMNS = [
 SUMMARY_COLUMNS = [
     "item",
     *_DETECTION_FIELDS,
+    "cheapest_seen",
     "min",
     "mean",
     "confidence",
@@ -154,27 +155,49 @@ class HistoryTab:
             return set()
         return set(frame["item"])
 
-    def summarise(self) -> pd.DataFrame:
-        """Each item's latest detections, its cheapest min/mean, and when.
+    def summarise(self, window_days: float) -> pd.DataFrame:
+        """Each item's detections, its cheapest min/mean, and when.
 
-        The detection cells come from the latest *priced* sweep while
-        ``last_checked`` moves on every sweep of any status, so a run of
-        failures shows as a moving timestamp beside a stale price rather than
-        looking healthy.
+        ``cheapest_*`` reports the best price seen within ``window_days``
+        rather than the latest sweep's, because one sweep is a weak sample —
+        the same query has returned three retailers on one run and one on the
+        next. ``cheapest_seen`` dates it, since a price you cannot tell the
+        age of is not one you can act on.
+
+        The other detections stay from the latest priced sweep: "best-rated in
+        the last week" is not a meaningful thing to want. ``last_checked``
+        moves on every sweep of any status, so a run of failures shows as a
+        moving timestamp beside a stale price rather than looking healthy.
         """
         frame = self._typed()
         if frame.empty:
             return pd.DataFrame(columns=SUMMARY_COLUMNS)
 
+        cutoff = datetime.now() - timedelta(days=window_days)
         rows = []
         for item, group in frame.groupby("item", sort=False):
             ordered = group.sort_values("timestamp", kind="stable")
             priced = ordered[ordered["cheapest_price"].notna()]
             latest = priced.iloc[-1] if not priced.empty else None
+
+            recent = priced[
+                pd.to_datetime(
+                    priced["timestamp"], format=TIMESTAMP_FORMAT, errors="coerce"
+                )
+                >= cutoff
+            ]
+            best = (
+                recent.loc[recent["cheapest_price"].idxmin()]
+                if not recent.empty
+                else None
+            )
+
             row = {"item": item}
             for field in _DETECTION_FIELDS:
-                value = "" if latest is None else latest[field]
+                source = best if field.startswith("cheapest_") else latest
+                value = "" if source is None else source[field]
                 row[field] = _price_cell(value) if field.endswith("_price") else value
+            row["cheapest_seen"] = "" if best is None else best["timestamp"][:10]
             row["min"] = (
                 float(priced["cheapest_price"].min()) if not priced.empty else ""
             )
@@ -188,6 +211,33 @@ class HistoryTab:
             row["last_checked"] = ordered["timestamp"].iloc[-1]
             rows.append(row)
         return pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
+
+    def recent_source_high(self, window_days: float) -> dict[str, int]:
+        """The most retailers each item found within ``window_days``.
+
+        A sweep is judged thin against the item's own recent best rather than
+        a fixed bar, so a product genuinely sold by one shop never looks
+        disappointing while one that usually manages three does.
+        """
+        frame = self.read()
+        if frame.empty:
+            return {}
+        frame = frame.copy()
+        frame["_when"] = pd.to_datetime(
+            frame["timestamp"], format=TIMESTAMP_FORMAT, errors="coerce"
+        )
+        frame["_sources"] = pd.to_numeric(frame["sources"], errors="coerce")
+        recent = frame[
+            frame["_when"].notna()
+            & frame["_sources"].notna()
+            & (frame["_when"] >= datetime.now() - timedelta(days=window_days))
+        ]
+        if recent.empty:
+            return {}
+        return {
+            str(item): int(group["_sources"].max())
+            for item, group in recent.groupby("item", sort=False)
+        }
 
     def _typed(self) -> pd.DataFrame:
         """History with the cheapest price coerced to numbers, blanks to NaN."""

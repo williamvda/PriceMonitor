@@ -6,6 +6,9 @@ siblings) depend only on the shape of a spreadsheet client — ``read``,
 specifically. Depending on this Protocol instead keeps the sheets package
 decoupled from the infrastructure package and trivially testable with a fake
 that implements the same three methods without inheriting from anything.
+
+Also exports :func:`is_missing_tab_error`, the one error signature every tab
+module treats as "safe to create" rather than "unreadable, do not touch".
 """
 
 from typing import Protocol
@@ -33,3 +36,16 @@ class MonitoredSheetInterface(SheetInterface, Protocol):
     """
 
     def is_modified(self) -> bool: ...
+
+
+def is_missing_tab_error(exc: Exception) -> bool:
+    """True when ``exc`` is the Sheets API's shape for "this tab does not exist".
+
+    A missing tab has no dedicated exception type — the API reports it as a
+    failure to parse the address range, so a message-substring match is the
+    only signal available. Anything else (a 5xx, a timeout, an auth failure,
+    a local pandas error over ragged rows) must not match: those mean the tab
+    exists and either the read or the world briefly failed, not that the tab
+    is absent.
+    """
+    return "unable to parse range" in str(exc).lower()

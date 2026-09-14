@@ -1,9 +1,10 @@
 """Value objects for PriceMonitor.
 
 Defines the tracked :class:`Item`, the :class:`Detection` naming one retailer's
-offer, and the :class:`PriceReading` recorded for it on each run, the
-:class:`PriceStatus` describing how that reading turned out, and the
-:class:`PriceStats` summarising an item's history so far.
+offer, the :class:`Rating` naming a cached retailer's review score, and the
+:class:`PriceReading` recorded for it on each run, the :class:`PriceStatus`
+describing how that reading turned out, and the :class:`PriceStats` summarising
+an item's history so far.
 
 These are the value objects that cross the search -> sheets -> notifier
 boundary, which is why they live here rather than in any one layer.
@@ -29,6 +30,20 @@ class PriceStatus(str, Enum):
     NOT_FOUND = "not_found"
     PARSE_ERROR = "parse_error"
     ERROR = "error"
+
+
+@dataclass(frozen=True)
+class Rating:
+    """One retailer's review score, as cached rather than as freshly asked.
+
+    An all-default ``Rating`` means the site was looked up and nothing was
+    found — a different and much cheaper state than never having asked, which
+    is represented by the site being absent from the cache entirely.
+    """
+
+    rating: float | None = None
+    reviews: int | None = None
+    source: str = ""
 
 
 @dataclass(frozen=True)
