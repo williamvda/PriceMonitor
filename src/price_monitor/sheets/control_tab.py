@@ -64,8 +64,9 @@ class ControlTab:
                 return None
             message = (
                 f"The '{self._sheet_name}' tab could not be read ({exc}), so no "
-                f"controls are being applied. Every row is probably short of "
-                f"its header — a column added and later emptied does this."
+                f"controls are being applied. If that error came from pandas, "
+                f"every row is short of its header — a column added and later "
+                f"emptied does this."
             )
             self.logger.warning(message)
             self._notify(f"⚠️ PriceMonitor — {message}")

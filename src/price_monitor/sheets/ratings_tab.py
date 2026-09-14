@@ -150,8 +150,8 @@ class RatingsTab:
         its header (which fails in pandas, locally) — means the tab exists
         and still holds data, so it must never be written: ``write()`` clears
         before it writes. ``update()`` calls this up to three times per run,
-        so the alert for that case is deduplicated via
-        ``self._unreadable_notified`` rather than sent on every call.
+        so the *alert* for that case is deduplicated via
+        ``self._unreadable_notified``; the warning is logged every time.
         """
         try:
             frame = self._gsheet.read(sheet_name=self._sheet_name)
@@ -160,12 +160,15 @@ class RatingsTab:
                 self.logger.info(f"No '{self._sheet_name}' tab ({exc}); creating it.")
                 self._write(pd.DataFrame(columns=COLUMNS))
                 return pd.DataFrame(columns=COLUMNS)
+            message = (
+                f"The '{self._sheet_name}' tab could not be read ({exc}), so "
+                f"no cached ratings are being used and none will be written."
+            )
+            # Logged every time: the log is the record of what actually
+            # happened, and a failure that changes between runs matters.
+            # Only the alert is deduplicated.
+            self.logger.warning(message)
             if not self._unreadable_notified:
-                message = (
-                    f"The '{self._sheet_name}' tab could not be read ({exc}), so "
-                    f"no cached ratings are being used and none will be written."
-                )
-                self.logger.warning(message)
                 self._notify(f"⚠️ PriceMonitor — {message}")
                 self._unreadable_notified = True
             return None

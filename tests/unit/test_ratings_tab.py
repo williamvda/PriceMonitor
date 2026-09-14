@@ -118,6 +118,24 @@ def test_an_unreadable_tab_notifies_only_once_per_run(logger):
     assert len(sent) == 1
 
 
+def test_suppressing_the_alert_does_not_suppress_the_log(logger, caplog):
+    """The alert is deduplicated; the log is the record of what happened. A
+    second, different failure must still be traceable in the log even though
+    the user is not paged twice."""
+    sent: list[str] = []
+    sheet = FakeSheet(error=RuntimeError("503 Service Unavailable"))
+    tab = RatingsTab(sheet, "Ratings", logger, notify=sent.append)
+    with caplog.at_level(logging.WARNING):
+        tab.read()
+        sheet.error = ValueError("2 columns passed, passed data had 1 columns")
+        tab.read()
+
+    logged = "\n".join(record.message for record in caplog.records)
+    assert len(sent) == 1
+    assert "503 Service Unavailable" in logged
+    assert "passed data had 1 columns" in logged
+
+
 def test_a_recovered_tab_can_notify_again_on_a_later_failure(logger):
     """The suppression flag must not be a lifetime ban: a tab that comes back
     healthy and later breaks again is a new problem worth a new alert."""
