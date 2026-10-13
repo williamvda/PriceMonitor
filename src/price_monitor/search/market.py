@@ -105,6 +105,9 @@ class MarketSearcher:
     ) -> PriceReading:
         """Sweep UK retailers for ``item``, never raising on failure.
 
+        The one exception is :class:`SpendCapReached`, which no later item
+        could survive either.
+
         ``blocked`` names retailers the user never wants reported. They are
         dropped before ranking and do not count toward ``sources`` — a shop
         you would not buy from is not corroboration.

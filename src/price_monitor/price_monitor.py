@@ -31,12 +31,12 @@ from price_monitor.msgserver_client.msg_forwarder import (
     detach_msg_server,
     format_check_complete,
     format_check_failed,
-    format_check_started,
     format_price_drop,
     format_startup_message,
 )
 from price_monitor.search.market import MarketSearcher
 from price_monitor.search.ratings import RATING_BATCH, RatingsLookup
+from price_monitor.search.searcher import SpendCapReached
 from price_monitor.sheets.control_tab import ControlTab
 from price_monitor.sheets.history_tab import HistoryTab
 from price_monitor.sheets.items_tab import ItemsTab
@@ -125,6 +125,7 @@ class PriceMonitor:
             gsheet, self.ctrl.ratings_sheet, self.logger, notify=self.notifier.notify
         )
         self._gsheet = gsheet
+        self.paused_until: datetime | None = None
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name="PriceMonitor")
 
@@ -155,6 +156,8 @@ class PriceMonitor:
         # Ratings before the sweeps: this run's sweeps read the cache the
         # refresh just filled, so filling it afterwards would waste a day.
         self._refresh_ratings()
+        if self.paused_until:
+            return
         self._price_and_record("update", due)
 
     def _refresh_ratings(self) -> None:
@@ -173,6 +176,8 @@ class PriceMonitor:
                 return
             self.logger.info(f"Rating {len(stale)} retailer(s)")
             self.ratings_tab.store(self.ratings_lookup.fetch(stale))
+        except SpendCapReached as exc:
+            self._pause(exc)
         except Exception as exc:
             self.logger.warning(f"Ratings refresh failed: {exc}")
 
@@ -218,14 +223,13 @@ class PriceMonitor:
         self._price_and_record("poll", new_items)
 
     def _price_and_record(self, label: str, items: list[Item]) -> None:
-        """Price ``items`` and write them back, bracketed by notifications.
+        """Price ``items`` and write them back, then send a completion notice.
 
         Only checks with work to do are announced — an idle poll would
-        otherwise send a start/complete pair every ``poll_rate_m`` minutes.
+        otherwise send a completion notice every ``poll_rate_m`` minutes.
         The exception is re-raised after notifying so ``_safe_run`` still logs
         it and the loop still retries next tick.
         """
-        self.notifier.notify(format_check_started(label, len(items)))
         try:
             # Read before the append, so a new low price is compared against the
             # mean of the readings that came before it rather than one it has
@@ -240,7 +244,9 @@ class PriceMonitor:
         except Exception as exc:
             self.notifier.notify(format_check_failed(label, exc))
             raise
-        self.notifier.notify(format_check_complete(label, readings))
+        # A paused check already reported itself once, via _pause's warning.
+        if not self.paused_until:
+            self.notifier.notify(format_check_complete(label, readings))
         self._notify_price_drops(readings, baseline)
 
     def _notify_price_drops(
@@ -301,16 +307,20 @@ class PriceMonitor:
         # sweep rather than read once after the loop — reading it once would
         # silently keep only the last item's retailers.
         seen: set[str] = set()
-        for index, item in enumerate(items):
-            if index and self.ctrl.request_delay_s:
-                self.stop_event.wait(self.ctrl.request_delay_s)
-            last = last_prices.get(item.name)
-            reading = self._sweep_one(item, last, blocked, ratings, seen)
-            readings.append(
-                self._resweep_if_thin(
-                    reading, item, last, blocked, source_high, ratings, seen
+        try:
+            for index, item in enumerate(items):
+                if index and self.ctrl.request_delay_s:
+                    self.stop_event.wait(self.ctrl.request_delay_s)
+                last = last_prices.get(item.name)
+                reading = self._sweep_one(item, last, blocked, ratings, seen)
+                readings.append(
+                    self._resweep_if_thin(
+                        reading, item, last, blocked, source_high, ratings, seen
+                    )
                 )
-            )
+        except SpendCapReached as exc:
+            # Stop, but keep the readings already taken: they were paid for.
+            self._pause(exc)
         self._register_seen(seen)
         return readings
 
@@ -388,6 +398,8 @@ class PriceMonitor:
             reading = self._searcher.price_market(
                 item, last_price, timestamp, blocked, ratings
             )
+        except SpendCapReached:
+            raise
         except Exception as exc:
             # One failed sweep must never abort the rest of the run.
             self.logger.warning(f"Sweep for '{item.name}' failed: {exc}")
@@ -404,6 +416,21 @@ class PriceMonitor:
         seen |= getattr(self._searcher, "seen_sites", set())
         return reading
 
+    def _pause(self, exc: SpendCapReached) -> None:
+        """Stop all checks until the spend cap resets next month.
+
+        Resumes at noon on the 1st rather than midnight: the cap is assumed to
+        reset at midnight US Pacific time, which is 08:00 in the UK.
+        """
+        now = datetime.now()
+        self.paused_until = (now.replace(day=1) + timedelta(days=32)).replace(
+            day=1, hour=12, minute=0, second=0, microsecond=0
+        )
+        self.logger.warning(
+            f"Monthly spending cap reached; pausing until "
+            f"{self.paused_until:%Y-%m-%d %H:%M}: {exc}"
+        )
+
     def run(self) -> None:
         """Timer loop: a slow full refresh, a faster poll for new items."""
         refresh_interval_s = self.ctrl.refresh_rate_h * 3600
@@ -413,6 +440,14 @@ class PriceMonitor:
         last_poll = time.monotonic()
 
         while not self.stop_event.is_set():
+            if self.paused_until:
+                if datetime.now() < self.paused_until:
+                    self.stop_event.wait(_MAX_SLEEP_S)
+                    continue
+                self.logger.info("Spend cap pause over; resuming")
+                self.paused_until = None
+                last_refresh = 0.0
+
             if (
                 last_refresh == 0.0
                 or time.monotonic() - last_refresh >= refresh_interval_s

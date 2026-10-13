@@ -4,7 +4,8 @@ Both the search and format calls retry transient server-side failures with
 exponential backoff; see :func:`retrying` for the retry mechanism and
 :func:`_is_retryable` for what counts as transient.
 
-Exports :func:`retrying` (the retry loop) and :const:`FORMAT_PROVIDER` (the
+Exports :func:`retrying` (the retry loop), :class:`SpendCapReached` (raised
+in place of the monthly spend-cap 429) and :const:`FORMAT_PROVIDER` (the
 un-grounded provider name), consumed by
 :class:`~price_monitor.search.market.MarketSearcher` and by
 :class:`~price_monitor.search.ratings.RatingsLookup`.
@@ -14,7 +15,12 @@ import logging
 import time
 from typing import Callable
 
-from llmbridge.exceptions import LLMConnectionError, LLMError, LLMResponseError
+from llmbridge.exceptions import (
+    LLMConnectionError,
+    LLMError,
+    LLMRateLimitError,
+    LLMResponseError,
+)
 from llmbridge.models import PromptResponse
 
 # Call two must not be grounded: it is the un-grounded regime that makes JSON
@@ -28,6 +34,14 @@ _RETRY_BASE_DELAY_S = 2.0
 # on its own, so retrying it would turn an immediate, accurate error status
 # into the same error delayed by the whole backoff schedule.
 _RETRYABLE_STATUS = frozenset({500, 502, 503, 504})
+
+
+class SpendCapReached(Exception):
+    """The project's monthly spending cap is used up; no call can succeed.
+
+    Deliberately not an ``LLMError``: the per-item handlers catch those and
+    move on to the next item, which would repeat the same error once per item.
+    """
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -50,6 +64,8 @@ def retrying(
         try:
             return call()
         except Exception as exc:
+            if isinstance(exc, LLMRateLimitError) and "spending cap" in str(exc):
+                raise SpendCapReached(str(exc)) from exc
             if attempt == _RETRY_ATTEMPTS or not _is_retryable(exc):
                 raise
             logger.warning(
