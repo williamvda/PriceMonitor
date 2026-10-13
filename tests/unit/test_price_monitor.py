@@ -544,6 +544,24 @@ def test_a_pause_command_pauses_until_next_month(logger, searcher):
     assert reply == f"⏸ PriceMonitor paused until {monitor.paused_until:%Y-%m-%d %H:%M}"
 
 
+def test_update_skips_items_with_search_off(logger, searcher):
+    items = pd.DataFrame([{"item": "Widget", "search": "FALSE"}, {"item": "Gadget"}])
+    sheet = FakeSheet({"Items": items})
+    monitor = _monitor(sheet, searcher, logger)
+    monitor.update(force=True)
+    assert searcher.swept == ["Gadget"]
+    # Still listed: the summary rewrite must not drop an item that was skipped.
+    assert set(sheet.tabs["Items"]["item"]) == {"Widget", "Gadget"}
+
+
+def test_poll_skips_a_new_item_with_search_off(logger, searcher):
+    items = pd.DataFrame([{"item": "Widget", "search": "FALSE"}])
+    sheet = FakeSheet({"Items": items})
+    sheet.modified = True
+    _monitor(sheet, searcher, logger).poll()
+    assert searcher.swept == []
+
+
 def test_parser_accepts_msg_server_flag():
     assert args_parser().parse_args(["--secrets", "/tmp/s", "--msg-server"]).msg_server
     assert args_parser().parse_args(["--secrets", "/tmp/s"]).msg_server is False

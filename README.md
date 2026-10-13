@@ -333,11 +333,13 @@ and `Ratings` (see [The Control tab](#the-control-tab) and
 
 ### Items tab
 
-Column A (`item`) is yours; every column after it is rewritten on every run.
+Columns A (`item`) and B (`search`) are yours; every column after them is
+rewritten on every run.
 
 | Column | Owner | Meaning |
 | --- | --- | --- |
-| `item` | you | The product name — the only thing you type. |
+| `item` | you | The product name. |
+| `search` | you | `TRUE` or blank to price the item, `FALSE` to skip it. A checkbox works. Anything else is warned about and searched. |
 | `rated_price` | tool | The best-rated detection's price. Blank if nothing rated. |
 | `rated_site` | tool | Its retailer's domain. |
 | `rated_rating` | tool | Its rating and source, e.g. `4.4 Trustpilot`. |
@@ -354,7 +356,8 @@ Column A (`item`) is yours; every column after it is rewritten on every run.
 | `sources` | tool | How many retailers the latest sweep actually found — see [When a sweep finds only one retailer](#when-a-sweep-finds-only-one-retailer). Blank if never swept. |
 | `last_checked` | tool | Timestamp of the latest sweep, any status. Reads `never` for an item never swept — never a blank cell, since a blank cell is ambiguous between "not checked yet" and "something went wrong". |
 
-Duplicate `item` values are skipped and logged, not sent to the LLM.
+Duplicate `item` values are skipped and logged, not sent to the LLM. An item with
+`search` off keeps its row and its last summary; it is just not swept.
 
 ### Prices tab (history)
 

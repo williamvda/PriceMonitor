@@ -157,8 +157,11 @@ class PriceMonitor:
             return
         self._warn_orphaned_history(items)
 
-        due = items if force else self._due_for_refresh(items)
-        if skipped := len(items) - len(due):
+        searched = [item for item in items if item.search]
+        if off := len(items) - len(searched):
+            self.logger.info(f"Skipping {off} item(s) with search off")
+        due = searched if force else self._due_for_refresh(searched)
+        if skipped := len(searched) - len(due):
             self.logger.info(
                 f"Skipping {skipped} item(s) checked within the last "
                 f"{self.ctrl.refresh_rate_h}h"
@@ -230,7 +233,7 @@ class PriceMonitor:
             return
         items = self.items_tab.read()
         known = self.history.known_items()
-        new_items = [i for i in items if i.name not in known]
+        new_items = [i for i in items if i.search and i.name not in known]
         if not new_items:
             return
         self.logger.info(f"Found {len(new_items)} new items")

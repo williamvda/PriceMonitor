@@ -1,9 +1,9 @@
 """User-facing Items tab.
 
-Column A (``item``) is owned by the user and is the only thing they type; the
-summary columns after it are rewritten on every run with the latest sweep's
-three detections and the statistics over its cheapest series. Malformed rows
-are skipped rather than allowed to reach the LLM.
+Columns A (``item``) and B (``search``) are owned by the user and are the only
+things they type; the summary columns after them are rewritten on every run
+with the latest sweep's three detections and the statistics over its cheapest
+series. Malformed rows are skipped rather than allowed to reach the LLM.
 """
 
 import logging
@@ -24,9 +24,16 @@ from price_monitor.sheets.protocol import SheetInterface
 # thing holding such a row's width. It is not cosmetic and must not be moved.
 # Imported, not retyped: summarise() produces exactly this shape and
 # write_summary() writes it verbatim, so a second copy could only drift.
-COLUMNS = SUMMARY_COLUMNS
+COLUMNS = ["item", "search", *SUMMARY_COLUMNS[1:]]
 
-_SUMMARY_FIELDS = COLUMNS[1:-1]
+_SUMMARY_FIELDS = SUMMARY_COLUMNS[1:-1]
+
+
+def _search_flag(value: object) -> bool | None:
+    """Parse a ``search`` cell. Blank means search; unrecognised is None."""
+    if value is None or pd.isna(value) or str(value).strip() == "":
+        return True
+    return {"TRUE": True, "FALSE": False}.get(str(value).strip().upper())
 
 
 class ItemsTab:
@@ -66,7 +73,15 @@ class ItemsTab:
                 self.logger.warning(f"Row {position}: duplicate '{name}', skipping")
                 continue
             seen.add(name)
-            items.append(Item(name=name))
+            search = _search_flag(row.get("search"))
+            if search is None:
+                # Searched, not skipped: a typo must not silently stop pricing.
+                self.logger.warning(
+                    f"Row {position}: search '{row.get('search')}' is not "
+                    f"TRUE or FALSE, searching anyway"
+                )
+                search = True
+            items.append(Item(name=name, search=search))
         return items
 
     def write_summary(self, items: list[Item], summary: pd.DataFrame) -> None:
@@ -78,7 +93,8 @@ class ItemsTab:
         rows = []
         for item in items:
             stats = lookup.get(item.name, {})
-            row = {"item": item.name}
+            # A bool, not "TRUE": written RAW, so only a bool keeps a checkbox.
+            row = {"item": item.name, "search": item.search}
             for field in _SUMMARY_FIELDS:
                 row[field] = stats.get(field, "")
             row["last_checked"] = stats.get("last_checked", "")
