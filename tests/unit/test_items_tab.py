@@ -168,7 +168,7 @@ def test_an_unswept_item_still_anchors_the_last_column(logger):
 
     row = sheet.frame.iloc[0]
     assert list(sheet.frame.columns)[-1] == "last_checked"
-    for column in COLUMNS[1:-1]:
+    for column in COLUMNS[2:-1]:
         assert row[column] == "", column
     assert row["last_checked"] == "never"
 
@@ -190,3 +190,34 @@ def test_summary_row_order_follows_the_items_list(logger):
         [Item(name="B"), Item(name="A")], pd.DataFrame()
     )
     assert list(sheet.frame["item"]) == ["B", "A"]
+
+
+@pytest.mark.parametrize(
+    "value, search",
+    [("TRUE", True), ("false", False), (True, True), (False, False), ("", True)],
+)
+def test_the_search_flag_is_read(logger, value, search):
+    sheet = FakeSheet(pd.DataFrame([{"item": "Widget", "search": value}]))
+    assert ItemsTab(sheet, "Items", logger).read() == [Item("Widget", search)]
+
+
+def test_a_missing_search_column_means_search(logger):
+    sheet = FakeSheet(_items_frame([{"item": "Widget"}]))
+    assert ItemsTab(sheet, "Items", logger).read() == [Item("Widget", True)]
+
+
+def test_an_unrecognised_search_flag_warns_and_searches(logger, caplog):
+    sheet = FakeSheet(pd.DataFrame([{"item": "Widget", "search": "nope"}]))
+    with caplog.at_level(logging.WARNING):
+        items = ItemsTab(sheet, "Items", logger).read()
+    assert items == [Item("Widget", True)]
+    assert "not TRUE or FALSE" in caplog.text
+
+
+def test_the_search_flag_is_written_back_as_a_bool(logger):
+    sheet = FakeSheet()
+    ItemsTab(sheet, "Items", logger).write_summary(
+        [Item("Widget", False), Item("Gadget")], pd.DataFrame()
+    )
+    assert list(sheet.frame.columns[:2]) == ["item", "search"]
+    assert sheet.frame["search"].tolist() == [False, True]

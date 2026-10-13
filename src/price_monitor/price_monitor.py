@@ -4,7 +4,8 @@ Owns timing and orchestration: a slow full refresh of every tracked item
 (``refresh_rate_h``) and a faster poll that sweeps only items newly added to
 the sheet (``poll_rate_m``). One UK-wide sweep per item, whose three detections
 are recorded and whose cheapest price drives the notifications. All state lives
-in the spreadsheet, so a restart loses nothing. Neither JSON parsing nor
+in the spreadsheet, so a restart loses nothing but a pause or a cadence set
+by MsgServer command. Neither JSON parsing nor
 sheet-range addressing belongs here —
 those live in :mod:`price_monitor.app_config` and :mod:`price_monitor.sheets`.
 """
@@ -25,18 +26,19 @@ from py_utils.logger import consoleLogger, get_child_logger
 from price_monitor import __version__
 from price_monitor.app_config import PriceCtrl, load_price_config
 from price_monitor.models import Item, PriceReading, PriceStats, PriceStatus, Rating
+from price_monitor.msgserver_client.msg_commands import subscribe_commands
 from price_monitor.msgserver_client.msg_forwarder import (
     MsgNotifier,
     attach_msg_server,
     detach_msg_server,
     format_check_complete,
     format_check_failed,
-    format_check_started,
     format_price_drop,
     format_startup_message,
 )
 from price_monitor.search.market import MarketSearcher
 from price_monitor.search.ratings import RATING_BATCH, RatingsLookup
+from price_monitor.search.searcher import SpendCapReached
 from price_monitor.sheets.control_tab import ControlTab
 from price_monitor.sheets.history_tab import HistoryTab
 from price_monitor.sheets.items_tab import ItemsTab
@@ -86,6 +88,17 @@ class PriceMonitor:
                 report_dir=secrets / "reports",
             ),
         )
+        # Subscribed last: the handlers touch state _init_parts creates.
+        if self.msg_client is not None:
+            subscribe_commands(
+                self.msg_client,
+                handle=config.msg_config.handle,
+                on_update=self.update_requested.set,
+                on_pause=self._pause_by_command,
+                on_cadence=self._set_cadence,
+                notify=self.notifier.notify,
+                logger=self.logger,
+            )
 
     @classmethod
     def for_test(
@@ -125,6 +138,8 @@ class PriceMonitor:
             gsheet, self.ctrl.ratings_sheet, self.logger, notify=self.notifier.notify
         )
         self._gsheet = gsheet
+        self.paused_until: datetime | None = None
+        self.update_requested = threading.Event()
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name="PriceMonitor")
 
@@ -142,8 +157,11 @@ class PriceMonitor:
             return
         self._warn_orphaned_history(items)
 
-        due = items if force else self._due_for_refresh(items)
-        if skipped := len(items) - len(due):
+        searched = [item for item in items if item.search]
+        if off := len(items) - len(searched):
+            self.logger.info(f"Skipping {off} item(s) with search off")
+        due = searched if force else self._due_for_refresh(searched)
+        if skipped := len(searched) - len(due):
             self.logger.info(
                 f"Skipping {skipped} item(s) checked within the last "
                 f"{self.ctrl.refresh_rate_h}h"
@@ -155,6 +173,8 @@ class PriceMonitor:
         # Ratings before the sweeps: this run's sweeps read the cache the
         # refresh just filled, so filling it afterwards would waste a day.
         self._refresh_ratings()
+        if self.paused_until:
+            return
         self._price_and_record("update", due)
 
     def _refresh_ratings(self) -> None:
@@ -173,6 +193,8 @@ class PriceMonitor:
                 return
             self.logger.info(f"Rating {len(stale)} retailer(s)")
             self.ratings_tab.store(self.ratings_lookup.fetch(stale))
+        except SpendCapReached as exc:
+            self._pause(exc)
         except Exception as exc:
             self.logger.warning(f"Ratings refresh failed: {exc}")
 
@@ -211,21 +233,20 @@ class PriceMonitor:
             return
         items = self.items_tab.read()
         known = self.history.known_items()
-        new_items = [i for i in items if i.name not in known]
+        new_items = [i for i in items if i.search and i.name not in known]
         if not new_items:
             return
         self.logger.info(f"Found {len(new_items)} new items")
         self._price_and_record("poll", new_items)
 
     def _price_and_record(self, label: str, items: list[Item]) -> None:
-        """Price ``items`` and write them back, bracketed by notifications.
+        """Price ``items`` and write them back, then send a completion notice.
 
         Only checks with work to do are announced — an idle poll would
-        otherwise send a start/complete pair every ``poll_rate_m`` minutes.
+        otherwise send a completion notice every ``poll_rate_m`` minutes.
         The exception is re-raised after notifying so ``_safe_run`` still logs
         it and the loop still retries next tick.
         """
-        self.notifier.notify(format_check_started(label, len(items)))
         try:
             # Read before the append, so a new low price is compared against the
             # mean of the readings that came before it rather than one it has
@@ -240,7 +261,9 @@ class PriceMonitor:
         except Exception as exc:
             self.notifier.notify(format_check_failed(label, exc))
             raise
-        self.notifier.notify(format_check_complete(label, readings))
+        # A paused check already reported itself once, via _pause's warning.
+        if not self.paused_until:
+            self.notifier.notify(format_check_complete(label, readings))
         self._notify_price_drops(readings, baseline)
 
     def _notify_price_drops(
@@ -301,16 +324,20 @@ class PriceMonitor:
         # sweep rather than read once after the loop — reading it once would
         # silently keep only the last item's retailers.
         seen: set[str] = set()
-        for index, item in enumerate(items):
-            if index and self.ctrl.request_delay_s:
-                self.stop_event.wait(self.ctrl.request_delay_s)
-            last = last_prices.get(item.name)
-            reading = self._sweep_one(item, last, blocked, ratings, seen)
-            readings.append(
-                self._resweep_if_thin(
-                    reading, item, last, blocked, source_high, ratings, seen
+        try:
+            for index, item in enumerate(items):
+                if index and self.ctrl.request_delay_s:
+                    self.stop_event.wait(self.ctrl.request_delay_s)
+                last = last_prices.get(item.name)
+                reading = self._sweep_one(item, last, blocked, ratings, seen)
+                readings.append(
+                    self._resweep_if_thin(
+                        reading, item, last, blocked, source_high, ratings, seen
+                    )
                 )
-            )
+        except SpendCapReached as exc:
+            # Stop, but keep the readings already taken: they were paid for.
+            self._pause(exc)
         self._register_seen(seen)
         return readings
 
@@ -388,6 +415,8 @@ class PriceMonitor:
             reading = self._searcher.price_market(
                 item, last_price, timestamp, blocked, ratings
             )
+        except SpendCapReached:
+            raise
         except Exception as exc:
             # One failed sweep must never abort the rest of the run.
             self.logger.warning(f"Sweep for '{item.name}' failed: {exc}")
@@ -404,15 +433,60 @@ class PriceMonitor:
         seen |= getattr(self._searcher, "seen_sites", set())
         return reading
 
+    def _pause_until_next_month(self) -> None:
+        """Stop all checks until noon on the 1st of next month.
+
+        Noon rather than midnight: the spend cap is assumed to reset at
+        midnight US Pacific time, which is 08:00 in the UK.
+        """
+        now = datetime.now()
+        self.paused_until = (now.replace(day=1) + timedelta(days=32)).replace(
+            day=1, hour=12, minute=0, second=0, microsecond=0
+        )
+
+    def _pause(self, exc: SpendCapReached) -> None:
+        self._pause_until_next_month()
+        self.logger.warning(
+            f"Monthly spending cap reached; pausing until "
+            f"{self.paused_until:%Y-%m-%d %H:%M}: {exc}"
+        )
+
+    def _pause_by_command(self) -> str:
+        """Pause on request; returns the reply. Runs on the MsgServer thread."""
+        self._pause_until_next_month()
+        # Info, not warning: a warning would be forwarded on top of the reply.
+        self.logger.info(f"Paused by command until {self.paused_until:%Y-%m-%d %H:%M}")
+        return f"⏸ PriceMonitor paused until {self.paused_until:%Y-%m-%d %H:%M}"
+
+    def _set_cadence(self, hours: float) -> None:
+        """Change the full-update interval until restart. Runs on the MsgServer
+        thread; the run loop re-reads it on every pass."""
+        self.ctrl.refresh_rate_h = hours
+        self.logger.info(f"Refresh rate set to {hours:g}h by command")
+
     def run(self) -> None:
         """Timer loop: a slow full refresh, a faster poll for new items."""
-        refresh_interval_s = self.ctrl.refresh_rate_h * 3600
         poll_interval_s = self.ctrl.poll_rate_m * 60
 
         last_refresh = 0.0  # zero so a full refresh fires immediately on start
         last_poll = time.monotonic()
 
         while not self.stop_event.is_set():
+            refresh_interval_s = self.ctrl.refresh_rate_h * 3600
+            if self.update_requested.is_set():
+                self.update_requested.clear()
+                self.paused_until = None
+                self._safe_run("Update", lambda: self.update(force=True))
+                last_refresh = time.monotonic()
+
+            if self.paused_until:
+                if datetime.now() < self.paused_until:
+                    self.stop_event.wait(_MAX_SLEEP_S)
+                    continue
+                self.logger.info("Pause over; resuming")
+                self.paused_until = None
+                last_refresh = 0.0
+
             if (
                 last_refresh == 0.0
                 or time.monotonic() - last_refresh >= refresh_interval_s

@@ -62,9 +62,10 @@ class Detection:
 
 @dataclass(frozen=True)
 class Item:
-    """One tracked product. The user types only its name."""
+    """One tracked product. The user types its name and whether to search it."""
 
     name: str
+    search: bool = True
 
 
 @dataclass(frozen=True)

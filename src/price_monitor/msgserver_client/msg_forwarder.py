@@ -4,7 +4,7 @@ Public surface: :class:`MsgServerHandler`, a logging handler that forwards each
 warning-or-above record to a MsgServer handle; :class:`MsgNotifier`, for
 deliberate status messages that are not log records; :func:`attach_msg_server`
 and :func:`detach_msg_server` for wiring and teardown; and the
-``format_*`` helpers that render the start, complete, failure, and price-drop
+``format_*`` helpers that render the startup, complete, failure, and price-drop
 notices for one pricing check. The handler is purely additive — records still
 reach every other handler on the logger, so console output is unchanged whether
 or not the server is reachable.
@@ -97,11 +97,6 @@ def format_startup_message(version: str) -> str:
     revision, not just that something started.
     """
     return f"🟢 PriceMonitor v{version} started"
-
-
-def format_check_started(label: str, item_count: int) -> str:
-    """Render the notice sent when a pricing check begins."""
-    return f"⏳ PriceMonitor {label} started — {item_count} item(s)"
 
 
 def format_check_complete(label: str, readings: list[PriceReading]) -> str:

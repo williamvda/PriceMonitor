@@ -16,7 +16,6 @@ from price_monitor.msgserver_client.msg_forwarder import (
     detach_msg_server,
     format_check_complete,
     format_check_failed,
-    format_check_started,
     format_price_drop,
     format_startup_message,
 )
@@ -73,12 +72,6 @@ def logger() -> logging.Logger:
 
 def test_startup_message_names_the_monitor():
     assert format_startup_message("0.1.7") == "🟢 PriceMonitor v0.1.7 started"
-
-
-def test_check_started_reports_the_label_and_count():
-    assert format_check_started("update", 3) == (
-        "⏳ PriceMonitor update started — 3 item(s)"
-    )
 
 
 def test_all_priced_reports_success():

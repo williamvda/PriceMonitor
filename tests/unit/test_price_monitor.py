@@ -15,6 +15,7 @@ import price_monitor.price_monitor as price_monitor_module
 from price_monitor.app_config import PriceCtrl
 from price_monitor.models import Detection, Item, PriceReading, PriceStatus
 from price_monitor.price_monitor import PriceMonitor, args_parser
+from price_monitor.search.searcher import SpendCapReached
 from price_monitor.sheets.history_tab import COLUMNS as HISTORY_COLUMNS
 
 
@@ -414,13 +415,12 @@ def test_for_test_monitor_has_notifications_disabled(logger, searcher):
     monitor.update()  # the no-op notifier must not get in the way
 
 
-def test_update_brackets_the_check_with_start_and_complete(logger, searcher):
+def test_update_sends_only_a_complete_notice(logger, searcher):
     sheet = FakeSheet({"Items": _items(["Widget", "Gadget"])})
     monitor, notifier = _monitor_with_notifier(sheet, searcher, logger)
     monitor.update()
 
     assert notifier.messages == [
-        "⏳ PriceMonitor update started — 2 item(s)",
         "✅ PriceMonitor update complete — 2/2 priced, 0 failed",
     ]
 
@@ -482,9 +482,84 @@ def test_a_poll_is_labelled_poll_not_update(logger, searcher):
     monitor.poll()
 
     assert notifier.messages == [
-        "⏳ PriceMonitor poll started — 1 item(s)",
         "✅ PriceMonitor poll complete — 1/1 priced, 0 failed",
     ]
+
+
+def test_the_spend_cap_stops_the_check_and_reports_once(logger, searcher, caplog):
+    searcher.raises = SpendCapReached("monthly spending cap")
+    sheet = FakeSheet({"Items": _items(["Widget", "Gadget"])})
+    monitor, notifier = _monitor_with_notifier(sheet, searcher, logger)
+
+    with caplog.at_level(logging.WARNING):
+        monitor.update()
+
+    assert searcher.swept == ["Widget"]
+    assert notifier.messages == []
+    assert [r.message for r in caplog.records if "spending cap" in r.message] == [
+        caplog.records[-1].message
+    ]
+    assert monitor.paused_until is not None
+
+
+def test_the_spend_cap_pause_ends_at_noon_on_the_next_month(logger, searcher):
+    class December(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 12, 14, 9, 30)
+
+    monitor = _monitor(FakeSheet({"Items": _items([])}), searcher, logger)
+    with mock.patch.object(price_monitor_module, "datetime", December):
+        monitor._pause(SpendCapReached("cap"))
+    assert monitor.paused_until == datetime(2027, 1, 1, 12, 0)
+
+
+def test_an_update_command_ends_a_pause_and_forces_an_update(logger, searcher):
+    monitor = _monitor(FakeSheet({"Items": _items([])}), searcher, logger)
+    monitor.paused_until = datetime.now() + timedelta(days=10)
+    forced: list[bool] = []
+    updated = threading.Event()
+
+    def recording_update(force: bool = False) -> None:
+        forced.append(force)
+        updated.set()
+
+    monitor.update = recording_update
+    monitor.update_requested.set()
+    monitor.thread.start()
+    try:
+        assert updated.wait(timeout=2.0)
+    finally:
+        monitor.stop()
+
+    assert forced[0] is True
+    assert monitor.paused_until is None
+
+
+def test_a_pause_command_pauses_until_next_month(logger, searcher):
+    monitor = _monitor(FakeSheet({"Items": _items([])}), searcher, logger)
+    reply = monitor._pause_by_command()
+    assert monitor.paused_until is not None
+    assert monitor.paused_until.day == 1
+    assert reply == f"⏸ PriceMonitor paused until {monitor.paused_until:%Y-%m-%d %H:%M}"
+
+
+def test_update_skips_items_with_search_off(logger, searcher):
+    items = pd.DataFrame([{"item": "Widget", "search": "FALSE"}, {"item": "Gadget"}])
+    sheet = FakeSheet({"Items": items})
+    monitor = _monitor(sheet, searcher, logger)
+    monitor.update(force=True)
+    assert searcher.swept == ["Gadget"]
+    # Still listed: the summary rewrite must not drop an item that was skipped.
+    assert set(sheet.tabs["Items"]["item"]) == {"Widget", "Gadget"}
+
+
+def test_poll_skips_a_new_item_with_search_off(logger, searcher):
+    items = pd.DataFrame([{"item": "Widget", "search": "FALSE"}])
+    sheet = FakeSheet({"Items": items})
+    sheet.modified = True
+    _monitor(sheet, searcher, logger).poll()
+    assert searcher.swept == []
 
 
 def test_parser_accepts_msg_server_flag():

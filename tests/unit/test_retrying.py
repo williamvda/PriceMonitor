@@ -12,7 +12,12 @@ from llmbridge.exceptions import (
 from llmbridge.models import PromptResponse
 
 import price_monitor.search.searcher as searcher_module
-from price_monitor.search.searcher import _RETRY_ATTEMPTS, FORMAT_PROVIDER, retrying
+from price_monitor.search.searcher import (
+    _RETRY_ATTEMPTS,
+    FORMAT_PROVIDER,
+    SpendCapReached,
+    retrying,
+)
 
 
 def _response(text: str = "ok") -> PromptResponse:
@@ -115,3 +120,15 @@ def test_call_two_is_never_grounded():
     """The un-grounded regime is what makes JSON output reliable, which is the
     whole reason a lookup is split in two."""
     assert FORMAT_PROVIDER == "gemini"
+
+
+def test_the_monthly_spend_cap_is_raised_as_its_own_error(logger, no_sleep):
+    call = FakeCall(
+        LLMRateLimitError(
+            "Rate limit exceeded (429): Your project has exceeded its monthly "
+            "spending cap."
+        )
+    )
+    with pytest.raises(SpendCapReached):
+        retrying(call, "market search", logger)
+    assert call.attempts == 1
