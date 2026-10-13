@@ -520,3 +520,21 @@ price-monitor --secrets /path/to/secrets --once
 
 Runs a single full refresh and exits — useful for testing a config or
 running from an external scheduler instead of PriceMonitor's own loop.
+
+```bash
+price-monitor --secrets /path/to/secrets --msg-server
+```
+
+Also sends warnings and status messages to MsgServer, and listens on the same
+handle for commands:
+
+| Command | Effect |
+|---|---|
+| `update` | Re-price every item now, ending any pause |
+| `pause` | Stop all checks until noon on the 1st of next month |
+| `cadence <hours>` | Set the hours between full updates (`refresh_rate_h`) |
+| `help` | List the commands |
+
+A pause and a cadence live in memory only: a restart goes back to the config's
+`refresh_rate_h` and runs straight away. Hitting the Gemini monthly spending cap
+pauses the monitor the same way `pause` does, after one warning.

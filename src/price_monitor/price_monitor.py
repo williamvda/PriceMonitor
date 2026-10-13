@@ -4,7 +4,8 @@ Owns timing and orchestration: a slow full refresh of every tracked item
 (``refresh_rate_h``) and a faster poll that sweeps only items newly added to
 the sheet (``poll_rate_m``). One UK-wide sweep per item, whose three detections
 are recorded and whose cheapest price drives the notifications. All state lives
-in the spreadsheet, so a restart loses nothing. Neither JSON parsing nor
+in the spreadsheet, so a restart loses nothing but a pause or a cadence set
+by MsgServer command. Neither JSON parsing nor
 sheet-range addressing belongs here —
 those live in :mod:`price_monitor.app_config` and :mod:`price_monitor.sheets`.
 """
@@ -25,6 +26,7 @@ from py_utils.logger import consoleLogger, get_child_logger
 from price_monitor import __version__
 from price_monitor.app_config import PriceCtrl, load_price_config
 from price_monitor.models import Item, PriceReading, PriceStats, PriceStatus, Rating
+from price_monitor.msgserver_client.msg_commands import subscribe_commands
 from price_monitor.msgserver_client.msg_forwarder import (
     MsgNotifier,
     attach_msg_server,
@@ -86,6 +88,17 @@ class PriceMonitor:
                 report_dir=secrets / "reports",
             ),
         )
+        # Subscribed last: the handlers touch state _init_parts creates.
+        if self.msg_client is not None:
+            subscribe_commands(
+                self.msg_client,
+                handle=config.msg_config.handle,
+                on_update=self.update_requested.set,
+                on_pause=self._pause_by_command,
+                on_cadence=self._set_cadence,
+                notify=self.notifier.notify,
+                logger=self.logger,
+            )
 
     @classmethod
     def for_test(
@@ -126,6 +139,7 @@ class PriceMonitor:
         )
         self._gsheet = gsheet
         self.paused_until: datetime | None = None
+        self.update_requested = threading.Event()
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name="PriceMonitor")
 
@@ -416,35 +430,57 @@ class PriceMonitor:
         seen |= getattr(self._searcher, "seen_sites", set())
         return reading
 
-    def _pause(self, exc: SpendCapReached) -> None:
-        """Stop all checks until the spend cap resets next month.
+    def _pause_until_next_month(self) -> None:
+        """Stop all checks until noon on the 1st of next month.
 
-        Resumes at noon on the 1st rather than midnight: the cap is assumed to
-        reset at midnight US Pacific time, which is 08:00 in the UK.
+        Noon rather than midnight: the spend cap is assumed to reset at
+        midnight US Pacific time, which is 08:00 in the UK.
         """
         now = datetime.now()
         self.paused_until = (now.replace(day=1) + timedelta(days=32)).replace(
             day=1, hour=12, minute=0, second=0, microsecond=0
         )
+
+    def _pause(self, exc: SpendCapReached) -> None:
+        self._pause_until_next_month()
         self.logger.warning(
             f"Monthly spending cap reached; pausing until "
             f"{self.paused_until:%Y-%m-%d %H:%M}: {exc}"
         )
 
+    def _pause_by_command(self) -> str:
+        """Pause on request; returns the reply. Runs on the MsgServer thread."""
+        self._pause_until_next_month()
+        # Info, not warning: a warning would be forwarded on top of the reply.
+        self.logger.info(f"Paused by command until {self.paused_until:%Y-%m-%d %H:%M}")
+        return f"⏸ PriceMonitor paused until {self.paused_until:%Y-%m-%d %H:%M}"
+
+    def _set_cadence(self, hours: float) -> None:
+        """Change the full-update interval until restart. Runs on the MsgServer
+        thread; the run loop re-reads it on every pass."""
+        self.ctrl.refresh_rate_h = hours
+        self.logger.info(f"Refresh rate set to {hours:g}h by command")
+
     def run(self) -> None:
         """Timer loop: a slow full refresh, a faster poll for new items."""
-        refresh_interval_s = self.ctrl.refresh_rate_h * 3600
         poll_interval_s = self.ctrl.poll_rate_m * 60
 
         last_refresh = 0.0  # zero so a full refresh fires immediately on start
         last_poll = time.monotonic()
 
         while not self.stop_event.is_set():
+            refresh_interval_s = self.ctrl.refresh_rate_h * 3600
+            if self.update_requested.is_set():
+                self.update_requested.clear()
+                self.paused_until = None
+                self._safe_run("Update", lambda: self.update(force=True))
+                last_refresh = time.monotonic()
+
             if self.paused_until:
                 if datetime.now() < self.paused_until:
                     self.stop_event.wait(_MAX_SLEEP_S)
                     continue
-                self.logger.info("Spend cap pause over; resuming")
+                self.logger.info("Pause over; resuming")
                 self.paused_until = None
                 last_refresh = 0.0
 
